@@ -1,0 +1,2552 @@
+// TripSync - Complete Schema with Paystack Monthly Commission Model
+// Drivers and riders pay monthly commission fees via Paystack to mobile money
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ===== RBAC SYSTEM =====
+
+enum UserRole {
+  SUPER_ADMIN
+  CITY_ADMIN
+  HOUSE_MOVER
+  EMERGENCY_ADMIN
+  PLACE_OWNER
+  STORE_OWNER
+  DRIVER
+  TAXI_DRIVER
+  USER
+  EMERGENCY_RESPONDER
+  DISPATCHER
+  SUPPORT_AGENT
+}
+
+enum Permission {
+  // User Management
+  CREATE_USER
+  READ_USER
+  UPDATE_USER
+  DELETE_USER
+  MANAGE_USER_ROLES
+  
+  // Driver Management
+  APPROVE_DRIVER
+  SUSPEND_DRIVER
+  VIEW_DRIVER_ANALYTICS
+  MANAGE_DRIVER_SHIFTS
+  APPROVE_TAXI_DRIVER
+  SUSPEND_TAXI_DRIVER
+  MANAGE_TAXI_LICENSES
+  
+  // Store Management
+  CREATE_STORE
+  UPDATE_STORE
+  DELETE_STORE
+  MANAGE_STORE_PRODUCTS
+  VIEW_STORE_ANALYTICS
+  
+  // Place Management
+  CREATE_PLACE
+  UPDATE_PLACE
+  DELETE_PLACE
+  APPROVE_PLACE
+  MANAGE_PLACE_PHOTOS
+  
+  // Service Management
+  CREATE_SERVICE
+  UPDATE_SERVICE
+  CANCEL_SERVICE
+  ASSIGN_DRIVER
+  
+  // Emergency Management
+  DISPATCH_EMERGENCY
+  MANAGE_RESPONDERS
+  VIEW_EMERGENCY_ANALYTICS
+  COORDINATE_INCIDENTS
+  
+  // Financial Management
+  VIEW_PAYMENTS
+  PROCESS_REFUNDS
+  MANAGE_COMMISSIONS
+  VIEW_FINANCIAL_REPORTS
+  
+  // System Management
+  MANAGE_SYSTEM_CONFIG
+  VIEW_SYSTEM_ANALYTICS
+  MANAGE_REGIONS
+  MANAGE_SERVICE_TYPES
+  
+  // Content Management
+  MODERATE_REVIEWS
+  MANAGE_NOTIFICATIONS
+  HANDLE_REPORTS
+}
+
+model RolePermission {
+  id           String     @id @default(uuid())
+  role         UserRole
+  permission   Permission
+  isActive     Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  
+  @@unique([role, permission])
+  @@map("role_permissions")
+}
+
+// ===== CORE USER MODELS =====
+
+model User {
+  id                 String               @id @default(uuid())
+  email              String               @unique // Changed to non-nullable
+  phone              String               @unique
+  passwordHash       String?              // New field for hashed password
+  username           String?              @unique
+  firstName          String?
+  lastName           String?
+  gender             Gender?
+  avatar             String?
+  dateOfBirth        DateTime?
+  isActive           Boolean              @default(true)
+  isVerified         Boolean              @default(false)
+  referralCode       String               @unique
+  referredBy         String?
+  role               UserRole             @default(USER)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  lastLoginAt        DateTime?
+  twoFactorEnabled   Boolean              @default(false)
+  twoFactorSecret    String?
+  
+  // Notification preferences
+  notificationPreferences Json?
+  
+  // Paystack Integration Fields
+  paystackCustomerCode    String?          @unique
+  paystackCustomerId      String?          @unique
+  paystackRecipientCode   String?          @unique
+  
+  // Mobile Money Account Details
+  mobileMoneyProvider     MobileMoneyProvider?
+  mobileMoneyNumber       String?
+  mobileMoneyAccountName  String?
+  mobileMoneyVerified     Boolean          @default(false)
+  
+  // Bank Account Details (Alternative to Mobile Money)
+  bankName                String?
+  bankAccountNumber       String?
+  bankAccountName         String?
+  bankCode                String?
+  bankAccountVerified     Boolean          @default(false)
+  
+  // Commission and Subscription Status
+  subscriptionStatus      SubscriptionStatus @default(ACTIVE)
+  subscriptionTier        SubscriptionTier   @default(BASIC)
+  lastCommissionPayment   DateTime?
+  nextCommissionDue       DateTime?
+  commissionBalance       Float              @default(0)
+  isCommissionCurrent     Boolean            @default(true)
+  
+  // User profiles based on role
+  customerProfile    CustomerProfile?
+  driverProfile      DriverProfile?
+  taxiDriverProfile  TaxiDriverProfile?
+  deliveryProfile    DeliveryProfile?
+  moverProfile       MoverProfile?
+  emergencyProfile   EmergencyProfile?
+  businessProfile    BusinessProfile?
+  storeOwnerProfile  StoreOwnerProfile?
+  placeOwnerProfile  PlaceOwnerProfile?
+  
+  // Service relationships
+  bookingsAsCustomer Booking[]            @relation("CustomerBookings")
+  bookingsAsProvider Booking[]            @relation("ProviderBookings")
+  
+  // Reviews and ratings
+  reviewsGiven       Review[]             @relation("ReviewGiver")
+  reviewsReceived    Review[]             @relation("ReviewReceiver")
+  
+  // Place recommendations
+  placeSurveys       Survey[]
+  placeVotes         PlaceVote[]
+  preferenceInsights UserPreferenceInsight[]
+  placeCategorySuggestions PlaceCategorySuggestion[]
+  
+  // Financial relationships
+  paymentMethods     PaymentMethod[]
+  transactions       Transaction[]
+  commissionPayments CommissionPayment[]
+  monthlyBills       MonthlyCommissionBill[]
+  payouts            ProviderPayout[]
+  
+  // Other relationships
+  emergencyContacts  EmergencyContact[]
+  notifications      Notification[]
+  favoriteLocations  FavoriteLocation[]
+  supportTickets     SupportTicket[]
+  sessions           UserSession[]
+  auditLogs          AuditLog[]
+  userSubscriptions  UserSubscription[]
+  
+  @@map("users")
+  DriverNotification DriverNotification[] @relation("DriverNotifications")
+  ordersAsCustomer    Order[]           @relation("CustomerOrders")
+}
+
+model UserSession {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token        String    @unique
+  deviceInfo   String?
+  ipAddress    String?
+  isActive     Boolean   @default(true)
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+  lastUsedAt   DateTime  @default(now())
+  
+  @@map("user_sessions")
+}
+
+model AnonymousUser {
+  id              String        @id @default(uuid())
+  name            String
+  gender          Gender?
+  sessionId       String?       @unique
+  createdAt       DateTime      @default(now())
+  lastActiveAt    DateTime      @default(now())
+  
+  placeSurveys    Survey[]
+  placeVotes      PlaceVote[]
+  preferenceInsights UserPreferenceInsight[]
+  placeCategorySuggestions PlaceCategorySuggestion[]
+  
+  @@map("anonymous_users")
+}
+
+// ===== MONTHLY COMMISSION SYSTEM =====
+
+model MonthlyCommissionBill {
+  id                    String                @id @default(uuid())
+  userId                String
+  billingMonth          Int                   // 1-12
+  billingYear           Int
+  
+  // Commission Breakdown
+  totalEarnings         Float                 @default(0)
+  totalRides            Int                   @default(0)
+  totalDeliveries       Int                   @default(0)
+  totalBookings         Int                   @default(0)
+  
+  // Commission Calculation
+  baseCommissionRate    Float                 @default(0.18) // 18%
+  calculatedCommission  Float                 @default(0)
+  discounts             Float                 @default(0)
+  penalties             Float                 @default(0)
+  finalCommissionDue    Float                 @default(0)
+  
+  // Payment Status
+  status                CommissionBillStatus  @default(PENDING)
+  dueDate               DateTime
+  paidAt                DateTime?
+  paymentMethod         String?
+  
+  // Paystack Integration
+  paystackReference     String?               @unique
+  paystackAccessCode    String?
+  paystackAuthUrl       String?
+  paystackStatus        String?
+  
+  // Relationships
+  user                  User                  @relation(fields: [userId], references: [id])
+  commissionPayments    CommissionPayment[]
+  billItems             CommissionBillItem[]
+  
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  
+  @@unique([userId, billingMonth, billingYear])
+  @@map("monthly_commission_bills")
+}
+
+model CommissionBillItem {
+  id                    String                @id @default(uuid())
+  billId                String
+  
+  // Item Details
+  serviceType           String                // RIDE, DELIVERY, etc.
+  description           String
+  quantity              Int                   @default(1)
+  unitAmount            Float
+  totalAmount           Float
+  commissionRate        Float
+  commissionAmount      Float
+  
+  // Reference Data
+  bookingId             String?
+  transactionId         String?
+  
+  bill                  MonthlyCommissionBill @relation(fields: [billId], references: [id], onDelete: Cascade)
+  
+  @@map("commission_bill_items")
+}
+
+model CommissionPayment {
+  id                    String                @id @default(uuid())
+  userId                String
+  billId                String?
+  
+  // Payment Details
+  amount                Float
+  currency              String                @default("NGN")
+  paymentType           CommissionPaymentType @default(MONTHLY_COMMISSION)
+  status                PaymentStatus         @default(PENDING)
+  
+  // Paystack Integration
+  paystackReference     String?               @unique
+  paystackAccessCode    String?
+  paystackAuthUrl       String?
+  paystackTransactionId String?
+  paystackStatus        String?
+  paystackResponse      Json?
+  
+  // Mobile Money Payout Details
+  payoutReference       String?
+  payoutStatus          PayoutStatus?         @default(PENDING)
+  payoutAmount          Float?
+  payoutCurrency        String?               @default("NGN")
+  payoutMethod          PayoutMethod?
+  payoutProvider        MobileMoneyProvider?
+  payoutAccountNumber   String?
+  payoutDate            DateTime?
+  payoutFailureReason   String?
+  
+  // Timing
+  dueDate               DateTime?
+  paidAt                DateTime?
+  payoutProcessedAt     DateTime?
+  
+  // Relationships
+  user                  User                  @relation(fields: [userId], references: [id])
+  bill                  MonthlyCommissionBill? @relation(fields: [billId], references: [id])
+  
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  
+  @@map("commission_payments")
+}
+
+// ===== ENHANCED PAYMENT SYSTEM =====
+
+model PaymentMethod {
+  id           String      @id @default(uuid())
+  userId       String
+  type         PaymentType
+  provider     String      @default("paystack")
+  
+  // Paystack Integration
+  paystackCustomerCode String?
+  paystackAuthCode     String?
+  paystackCardToken    String?
+  
+  // Card Details (Tokenized)
+  cardBin              String?
+  cardLast4            String?
+  cardType             String?
+  cardBrand            String?
+  expiryMonth          Int?
+  expiryYear           Int?
+  
+  // Bank Details
+  bankName             String?
+  bankCode             String?
+  accountNumber        String?
+  accountName          String?
+  
+  // Mobile Money Details
+  mobileMoneyProvider  MobileMoneyProvider?
+  mobileMoneyNumber    String?
+  mobileMoneyName      String?
+  
+  // Status and Preferences
+  isDefault            Boolean     @default(false)
+  isActive             Boolean     @default(true)
+  isVerified           Boolean     @default(false)
+  verifiedAt           DateTime?
+  
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+  
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  
+  @@map("payment_methods")
+}
+
+model Transaction {
+  id              String            @id @default(uuid())
+  userId          String
+  bookingId       String?
+  paymentMethodId String?
+  
+  // Transaction Details
+  amount          Float
+  currency        String            @default("NGN")
+  type            TransactionType
+  status          TransactionStatus @default(PENDING)
+  description     String?
+  
+  // Payment Gateway Integration
+  paystackReference    String?       @unique
+  paystackAccessCode   String?
+  paystackAuthUrl      String?
+  paystackTransactionId String?
+  paystackStatus       String?
+  paystackResponse     Json?
+  paystackFees         Float?        @default(0)
+  
+  // Commission and Fees
+  platformCommission   Float?        @default(0)
+  serviceFee          Float?        @default(0)
+  processingFee       Float?        @default(0)
+  tip                 Float?        @default(0)
+  netAmount           Float?
+  
+  // Provider Earnings (for service transactions)
+  providerEarning     Float?        @default(0)
+  providerPaid        Boolean       @default(false)
+  providerPaidAt      DateTime?
+  
+  // Refund Information
+  refundAmount        Float?
+  refundReason        String?
+  refundedAt          DateTime?
+  refundReference     String?
+  
+  // Parent transaction for refunds
+  parentTransactionId String?
+  parentTransaction   Transaction?  @relation("TransactionRefunds", fields: [parentTransactionId], references: [id])
+  refunds             Transaction[] @relation("TransactionRefunds")
+  
+  // Metadata
+  metadata            Json?
+  
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  user            User              @relation(fields: [userId], references: [id])
+  booking         Booking?          @relation(fields: [bookingId], references: [id])
+  paymentMethod   PaymentMethod?    @relation(fields: [paymentMethodId], references: [id])
+  
+  @@map("transactions")
+}
+
+model ProviderPayout {
+  id                String        @id @default(uuid())
+  providerId        String
+  
+  // Payout Details
+  amount            Float
+  currency          String        @default("NGN")
+  status            PayoutStatus  @default(PENDING)
+  payoutMethod      PayoutMethod  @default(BANK_TRANSFER)
+  
+  // Paystack Transfer Integration
+  paystackTransferCode String?
+  paystackRecipientCode String?
+  paystackReference    String?
+  paystackTransferStatus String?
+  paystackResponse     Json?
+  
+  // Mobile Money Payout
+  mobileMoneyProvider  MobileMoneyProvider?
+  mobileMoneyNumber    String?
+  mobileMoneyReference String?
+  
+  // Bank Transfer Details
+  bankName            String?
+  bankAccountNumber   String?
+  bankAccountName     String?
+  bankCode            String?
+  
+  // Payout Processing
+  payoutDate          DateTime?
+  processedAt         DateTime?
+  failureReason       String?
+  retryCount          Int           @default(0)
+  maxRetries          Int           @default(3)
+  
+  // Related Transactions
+  transactionIds      String[]      // Array of transaction IDs included
+  commissionDeducted  Float?        @default(0)
+  
+  // Scheduling
+  scheduledFor        DateTime?
+  isScheduled         Boolean       @default(false)
+  
+  provider            User          @relation(fields: [providerId], references: [id])
+  
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  @@map("provider_payouts")
+}
+
+// ===== SUBSCRIPTION AND BILLING =====
+
+model SubscriptionPlan {
+  id                  String              @id @default(uuid())
+  name                String              @unique
+  displayName         String
+  description         String?
+  tier                SubscriptionTier
+  
+  // Pricing
+  monthlyPrice        Float               @default(0)
+  yearlyPrice         Float               @default(0)
+  commissionRate      Float               @default(0.18)
+  
+  // Features
+  features            Json?               // Array of features
+  maxBookingsPerMonth Int?
+  maxEarningsPerMonth Float?
+  prioritySupport     Boolean             @default(false)
+  advancedAnalytics   Boolean             @default(false)
+  
+  // Status
+  isActive            Boolean             @default(true)
+  sortOrder           Int                 @default(0)
+  
+  subscriptions       UserSubscription[]
+  
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  
+  @@map("subscription_plans")
+}
+
+model UserSubscription {
+  id                  String              @id @default(uuid())
+  userId              String
+  planId              String
+  
+  // Subscription Details
+  status              SubscriptionStatus  @default(ACTIVE)
+  startDate           DateTime            @default(now())
+  endDate             DateTime?
+  renewalDate         DateTime?
+  
+  // Billing
+  billingCycle        BillingCycle        @default(MONTHLY)
+  nextBillingDate     DateTime?
+  lastBillingDate     DateTime?
+  
+  // Paystack Subscription
+  paystackSubscriptionCode String?        @unique
+  paystackCustomerCode     String?
+  paystackPlanCode         String?
+  
+  // Auto-renewal
+  autoRenew           Boolean             @default(true)
+  cancelledAt         DateTime?
+  cancellationReason  String?
+  
+  user                User                @relation(fields: [userId], references: [id])
+  plan                SubscriptionPlan    @relation(fields: [planId], references: [id])
+  
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  
+  @@map("user_subscriptions")
+}
+
+// ===== NOTIFICATION SYSTEM =====
+
+model Notification {
+  id          String            @id @default(uuid())
+  userId      String
+  title       String
+  body        String
+  type        NotificationType
+  data        String?
+  isRead      Boolean           @default(false)
+  priority    PriorityLevel     @default(STANDARD)
+  status      String?           @default("PENDING")
+  expiresAt   DateTime?
+  createdAt   DateTime          @default(now())
+  
+  user        User              @relation(fields: [userId], references: [id])
+  
+  @@map("notifications")
+}
+
+model ScheduledNotification {
+  id          String            @id @default(uuid())
+  userId      String
+  type        String
+  title       String
+  body        String
+  data        Json?
+  scheduledFor DateTime
+  status      String            @default("PENDING")
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  
+  @@map("scheduled_notifications")
+}
+
+// ===== USER PROFILES =====
+
+model CustomerProfile {
+  id                String           @id @default(uuid())
+  userId            String           @unique
+  preferredLanguage String           @default("en")
+  loyaltyPoints     Int              @default(0)
+  subscriptionTier  SubscriptionTier @default(BASIC)
+  totalSpent        Float            @default(0)
+  totalRides        Int              @default(0)
+  totalOrders       Int              @default(0)
+  averageRating     Float            @default(5.0)
+  
+  // Monthly Commission Tracking
+  monthlyCommissionDue Float           @default(0)
+  lastCommissionPaid   DateTime?
+  commissionStatus     CommissionStatus @default(CURRENT)
+  
+  // Preferences
+  preferredRideType RideType?
+  preferredPaymentMethod String?
+  allowSharedRides  Boolean          @default(true)
+  allowCallsFromDrivers Boolean       @default(true)
+  
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  addresses         Address[]
+  
+  @@map("customer_profiles")
+}
+
+model DriverProfile {
+  id                   String             @id @default(uuid())
+  userId               String             @unique
+  driverType           DriverType         @default(REGULAR)
+  licenseNumber        String             @unique
+  licenseExpiry        DateTime
+  licenseClass         String
+  vehicleId            String?
+  isAvailable          Boolean            @default(false)
+  isOnline             Boolean            @default(false)
+  currentLatitude      Float?
+  currentLongitude     Float?
+  heading              Float?
+  rating               Float              @default(5.0)
+  totalRides           Int                @default(0)
+  totalEarnings        Float              @default(0)
+  isVerified           Boolean            @default(false)
+  verificationStatus   VerificationStatus @default(PENDING)
+  dayBookingPrice      Float?
+  
+  // Monthly Commission Tracking
+  monthlyEarnings      Float              @default(0)
+  monthlyCommissionDue Float              @default(0)
+  lastCommissionPaid   DateTime?
+  commissionStatus     CommissionStatus   @default(CURRENT)
+  
+  // Payout Preferences
+  preferredPayoutMethod PayoutMethod      @default(MOBILE_MONEY)
+  payoutSchedule       PayoutSchedule     @default(WEEKLY)
+  minimumPayoutAmount  Float              @default(1000) // ₦10
+  
+  // Driver preferences
+  acceptsSharedRides   Boolean            @default(true)
+  acceptsCash          Boolean            @default(true)
+  maxRideDistance      Float?
+  isAvailableForDayBooking Boolean        @default(false)
+  
+  // Background check
+  backgroundCheckStatus BackgroundCheckStatus @default(PENDING)
+  backgroundCheckDate   DateTime?
+  
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicle              Vehicle?           @relation(fields: [vehicleId], references: [id])
+  
+  // Service relationships
+  serviceZones         DriverServiceZone[]
+  rideTypes            DriverRideType[]
+  earnings             DriverEarning[]
+  documents            DriverDocument[]
+  dayBookingConfig     DayBookingConfig?
+  dayBookingAvailability DayBookingAvailability[]
+  
+  @@map("driver_profiles")
+}
+
+model TaxiDriverProfile {
+  id                   String             @id @default(uuid())
+  userId               String             @unique
+  licenseNumber        String             @unique
+  licenseExpiry        DateTime
+  licenseClass         String
+  taxiLicenseNumber    String             @unique
+  taxiLicenseExpiry    DateTime
+  taxiPermitNumber     String?            @unique
+  taxiPermitExpiry     DateTime?
+  vehicleId            String?
+  isAvailable          Boolean            @default(false)
+  isOnline             Boolean            @default(false)
+  currentLatitude      Float?
+  currentLongitude     Float?
+  heading              Float?
+  rating               Float              @default(5.0)
+  totalRides           Int                @default(0)
+  totalEarnings        Float              @default(0)
+  isVerified           Boolean            @default(false)
+  verificationStatus   VerificationStatus @default(PENDING)
+  
+  // Taxi-specific fields
+  taxiZone             String?            // Assigned taxi zone
+  meterNumber          String?            @unique
+  meterCalibrationDate DateTime?
+  insurancePolicyNumber String?
+  insuranceExpiry      DateTime?
+  
+  // Monthly Commission Tracking
+  monthlyEarnings      Float              @default(0)
+  monthlyCommissionDue Float              @default(0)
+  lastCommissionPaid   DateTime?
+  commissionStatus     CommissionStatus   @default(CURRENT)
+  
+  // Payout Preferences
+  preferredPayoutMethod PayoutMethod      @default(MOBILE_MONEY)
+  payoutSchedule       PayoutSchedule     @default(WEEKLY)
+  minimumPayoutAmount  Float              @default(1000)
+  
+  // Taxi preferences
+  acceptsCash          Boolean            @default(true)
+  acceptsCard          Boolean            @default(true)
+  maxRideDistance      Float?
+  operatingHours       Json?              // Operating hours configuration
+  
+  // Background check
+  backgroundCheckStatus BackgroundCheckStatus @default(PENDING)
+  backgroundCheckDate   DateTime?
+  
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicle              Vehicle?           @relation(fields: [vehicleId], references: [id])
+  
+  // Service relationships
+  serviceZones         TaxiDriverServiceZone[]
+  earnings             TaxiDriverEarning[]
+  documents            TaxiDriverDocument[]
+  
+  @@map("taxi_driver_profiles")
+}
+
+model DeliveryProfile {
+  id                String             @id @default(uuid())
+  userId            String             @unique
+  vehicleType       VehicleType
+  isAvailable       Boolean            @default(false)
+  isOnline          Boolean            @default(false)
+  currentLatitude   Float?
+  currentLongitude  Float?
+  rating            Float              @default(5.0)
+  totalDeliveries   Int                @default(0)
+  totalEarnings     Float              @default(0)
+  maxWeightCapacity Float?
+  maxVolumeCapacity Float?
+  isVerified        Boolean            @default(false)
+  verificationStatus VerificationStatus @default(PENDING)
+  
+  // Monthly Commission Tracking
+  monthlyEarnings      Float             @default(0)
+  monthlyCommissionDue Float             @default(0)
+  lastCommissionPaid   DateTime?
+  commissionStatus     CommissionStatus  @default(CURRENT)
+  
+  // Delivery preferences
+  acceptsFood       Boolean            @default(true)
+  acceptsPackages   Boolean            @default(true)
+  acceptsGroceries  Boolean            @default(true)
+  acceptsPharmacy   Boolean            @default(true)
+  acceptsCash       Boolean            @default(true)
+  maxDeliveryDistance Float?
+  
+  // Dispatch rider specific fields
+  licenseNumber        String?
+  licenseExpiry        DateTime?
+  licenseClass         String?
+  deliveryZones        String?           // JSON array of delivery zones
+  operatingHours       String?           // JSON operating hours configuration
+  insurancePolicyNumber String?
+  insuranceExpiry      DateTime?
+  vehicleId            String?
+  vehicle              Vehicle?          @relation(fields: [vehicleId], references: [id])
+  heading              Float?
+  
+  // Documents relationship
+  documents            DeliveryDocument[]
+  
+  // Add createdAt and updatedAt if not present
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  earnings          DeliveryEarning[]
+  
+  @@map("delivery_profiles")
+  Delivery Delivery[]
+}
+
+model MoverProfile {
+  id              String             @id @default(uuid())
+  userId          String             @unique
+  companyName     String?
+  teamSize        Int                @default(1)
+  hasEquipment    Boolean            @default(false)
+  isAvailable     Boolean            @default(false)
+  isOnline        Boolean            @default(false)
+  rating          Float              @default(5.0)
+  totalMoves      Int                @default(0)
+  totalEarnings   Float              @default(0)
+  hourlyRate      Float?
+  isVerified      Boolean            @default(false)
+  verificationStatus VerificationStatus @default(PENDING)
+  
+  // Monthly Commission Tracking
+  monthlyEarnings      Float             @default(0)
+  monthlyCommissionDue Float             @default(0)
+  lastCommissionPaid   DateTime?
+  commissionStatus     CommissionStatus  @default(CURRENT)
+  
+  // Moving capabilities
+  maxWeight       Float?
+  hasPackingService Boolean           @default(false)
+  hasStorageService Boolean           @default(false)
+  hasDisassemblyService Boolean       @default(false)
+  equipment       Json?
+  
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  earnings        MoverEarning[]
+  
+  @@map("mover_profiles")
+}
+
+model EmergencyProfile {
+  id                  String        @id @default(uuid())
+  userId              String        @unique
+  
+  // Organization details
+  organizationName    String
+  organizationId      String?       @unique // External organization identifier
+  serviceType         EmergencyType
+  department          String?
+  headquarters        String?
+  contactPhone        String?
+  emergencyHotline    String?
+  serviceAreas        Json?         // Array of service areas
+  operatingHours      Json?         // Operating hours configuration
+  serviceCapacity     Int?          // Number of units/personnel
+  equipmentList       Json?         // Array of available equipment
+  certifications      Json?         // Array of certifications
+  emergencyContacts   Json?         // Emergency contact information
+  
+  // Representative details
+  badgeNumber         String?       @unique
+  rank                String?
+  title               String?       // Job title within organization
+  
+  // Operational status
+  isOnDuty            Boolean       @default(false)
+  currentLatitude     Float?
+  currentLongitude    Float?
+  lastLocationUpdate  DateTime?
+  responseRadius      Float         @default(10)
+  
+  // Status and verification
+  isVerified          Boolean       @default(false)
+  verifiedAt          DateTime?
+  verifiedBy          String?
+  isActive            Boolean       @default(true)
+  
+  // Metadata
+  notes               String?       // Internal notes
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  // Relationships
+  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("emergency_profiles")
+}
+
+model BusinessProfile {
+  id              String    @id @default(uuid())
+  userId          String    @unique
+  businessId      String?
+  isVerified      Boolean   @default(false)
+  canManageOrders Boolean   @default(true)
+  canManageMenu   Boolean   @default(true)
+  
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business        Business? @relation(fields: [businessId], references: [id])
+  
+  @@map("business_profiles")
+}
+
+model StoreOwnerProfile {
+  id                String         @id @default(uuid())
+  userId            String         @unique
+  businessLicense   String
+  taxId             String?
+  businessType      String
+  verificationStatus ApprovalStatus @default(PENDING)
+  verifiedAt        DateTime?
+  
+  // Monthly Commission Tracking
+  monthlyCommissionDue Float         @default(0)
+  lastCommissionPaid   DateTime?
+  commissionStatus     CommissionStatus @default(CURRENT)
+  
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stores            Store[]
+  
+  @@map("store_owner_profiles")
+}
+
+model PlaceOwnerProfile {
+  id                String           @id @default(uuid())
+  userId            String           @unique
+  businessLicense   String?
+  verificationStatus ApprovalStatus  @default(PENDING)
+  verifiedAt        DateTime?
+  subscriptionTier  SubscriptionTier @default(BASIC)
+  subscriptionExpiresAt DateTime?
+  
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  places            Place[]
+  
+  @@map("place_owner_profiles")
+}
+
+// ===== SERVICE SYSTEM =====
+
+model ServiceType {
+  id                String    @id @default(uuid())
+  name              String    @unique
+  displayName       String
+  description       String?
+  icon              String?
+  category          ServiceCategory
+  basePrice         Float
+  pricePerKm        Float?
+  pricePerMinute    Float?
+  pricePerHour      Float?
+  isActive          Boolean   @default(true)
+  sortOrder         Int       @default(0)
+  
+  // Commission Configuration
+  commissionRate    Float     @default(0.18)
+  platformFee       Float     @default(0)
+  
+  // Service configuration
+  requiresVehicle   Boolean   @default(true)
+  allowsScheduling  Boolean   @default(true)
+  maxAdvanceBooking Int?
+  minAdvanceBooking Int?
+  maxCapacity       Int       @default(1)
+  
+  bookings          Booking[]
+  pricingRules      PricingRule[]
+  
+  @@map("service_types")
+}
+
+model Booking {
+  id                String        @id @default(uuid())
+  bookingNumber     String        @unique
+  customerId        String
+  providerId        String?
+  serviceTypeId     String
+  status            BookingStatus @default(PENDING)
+  type              BookingType   @default(IMMEDIATE)
+  
+  // Scheduling
+  scheduledAt       DateTime?
+  requestedAt       DateTime      @default(now())
+  acceptedAt        DateTime?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  cancelledAt       DateTime?
+  
+  // Location details
+  pickupAddressId   String?
+  dropoffAddressId  String?
+  pickupLatitude    Float?
+  pickupLongitude   Float?
+  dropoffLatitude   Float?
+  dropoffLongitude  Float?
+  pickupInstructions String?
+  dropoffInstructions String?
+  
+  // Distance and pricing
+  estimatedDistance Float?
+  actualDistance    Float?
+  estimatedDuration Int?
+  actualDuration    Int?
+  estimatedPrice    Float?
+  finalPrice        Float?
+  surgePricing      Float         @default(1.0)
+  currency          String        @default("NGN")
+  
+  // Commission Tracking
+  platformCommission Float?       @default(0)
+  providerEarning    Float?       @default(0)
+  commissionRate     Float?       @default(0.18)
+  
+  // Service-specific data
+  serviceData       Json?
+  
+  // Payment
+  paymentStatus     PaymentStatus @default(PENDING)
+  paymentMethodId   String?
+  
+  // Notes and special requirements
+  notes             String?
+  specialRequests   String?
+  
+  // Cancellation
+  cancellationReason String?
+  cancelledBy       String?
+  cancellationFee   Float?
+  
+  // NEW: Inter-regional booking fields
+  isInterRegional   Boolean       @default(false)
+  originZoneId      String?
+  destinationZoneId String?
+  interRegionalFee  Float?        @default(0)
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  
+  // Relations
+  customer          User          @relation("CustomerBookings", fields: [customerId], references: [id])
+  provider          User?         @relation("ProviderBookings", fields: [providerId], references: [id])
+  serviceType       ServiceType   @relation(fields: [serviceTypeId], references: [id])
+  pickupAddress     Address?      @relation("PickupAddress", fields: [pickupAddressId], references: [id])
+  dropoffAddress    Address?      @relation("DropoffAddress", fields: [dropoffAddressId], references: [id])
+  
+  // NEW: Zone relationships
+  originZone        ServiceZone?  @relation("OriginZone", fields: [originZoneId], references: [id])
+  destinationZone   ServiceZone?  @relation("DestinationZone", fields: [destinationZoneId], references: [id])
+  
+  // Additional relationships
+  trackingUpdates   TrackingUpdate[]
+  transactions      Transaction[]
+  reviews           Review[]
+  orderItems        OrderItem[]
+  movingInventory   MovingInventoryItem[]
+  
+  @@map("bookings")
+  DriverNotification DriverNotification[]
+}
+
+// ===== DAY BOOKING SYSTEM =====
+
+model DayBookingConfig {
+  id                  String        @id @default(uuid())
+  driverProfileId     String        @unique
+  hourlyRate          Float
+  minimumHours        Int           @default(4)
+  maximumHours        Int           @default(12)
+  serviceAreas        String        // JSON array of service areas
+  availableDays       String        // JSON array of available days (0-6)
+  availableTimeSlots  String        // JSON array of time slots
+  specialRequirements String?
+  vehicleFeatures     String?       // JSON array of vehicle features
+  surgeMultiplier     Float         @default(1.0)
+  isActive            Boolean       @default(true)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  driverProfile       DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+  
+  @@map("day_booking_configs")
+}
+
+model DayBookingAvailability {
+  id                String        @id @default(uuid())
+  driverProfileId   String
+  date              DateTime
+  timeSlots         String        // JSON array of available time slots
+  isAvailable       Boolean       @default(true)
+  bookedSlots       String?       // JSON array of booked time slots
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  
+  driverProfile     DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+  
+  @@unique([driverProfileId, date])
+  @@map("day_booking_availability")
+}
+
+model DriverNotification {
+  id          String    @id @default(uuid())
+  driverId    String
+  bookingId   String
+  notifiedAt  DateTime  @default(now())
+  respondedAt DateTime?
+  status      DriverNotificationStatus @default(SENT)
+  response    DriverNotificationResponse?
+  
+  // Add both relationships
+  driver      User      @relation("DriverNotifications", fields: [driverId], references: [id])
+  booking     Booking   @relation(fields: [bookingId], references: [id])
+  
+  @@map("driver_notifications")
+}
+
+model BookingRejection {
+  id         String   @id @default(uuid())
+  bookingId  String
+  driverId   String
+  reason     String?
+  rejectedAt DateTime @default(now())
+  
+  @@map("booking_rejections")
+}
+
+model TripTracking {
+  id              String   @id @default(uuid())
+  bookingId       String
+  driverId        String
+  startLatitude   Float
+  startLongitude  Float
+  endLatitude     Float?
+  endLongitude    Float?
+  routePolyline   String?
+  actualDistance  Float?
+  actualDuration  Int?     // in minutes
+  averageSpeed    Float?
+  maxSpeed        Float?
+  startedAt       DateTime @default(now())
+  completedAt     DateTime?
+  
+  @@unique([bookingId])
+  @@map("trip_tracking")
+}
+
+model DriverLocationHistory {
+  id        String   @id @default(uuid())
+  driverId  String
+  latitude  Float
+  longitude Float
+  heading   Float?
+  speed     Float?
+  accuracy  Float?
+  timestamp DateTime @default(now())
+  
+  @@index([driverId, timestamp])
+  @@map("driver_location_history")
+}
+
+model SurgeZone {
+  id              String   @id @default(uuid())
+  name            String
+  centerLatitude  Float
+  centerLongitude Float
+  radius          Float    // in meters
+  currentSurge    Float    @default(1.0)
+  isActive        Boolean  @default(true)
+  boundaries      Json?    // GeoJSON polygon
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("surge_zones")
+}
+
+// ===== SUPPORTING MODELS =====
+
+model Vehicle {
+  id                  String            @id @default(uuid())
+  make                String
+  model               String
+  year                Int
+  color               String
+  licensePlate        String            @unique
+  type                VehicleType
+  category            VehicleCategory
+  capacity            Int               @default(4)
+  isActive            Boolean           @default(true)
+  isVerified          Boolean           @default(false)
+  
+  // Vehicle specifications
+  fuelType            FuelType          @default(GASOLINE)
+  transmission        TransmissionType  @default(AUTOMATIC)
+  hasAC               Boolean           @default(true)
+  hasWifi             Boolean           @default(false)
+  hasCharger          Boolean           @default(false)
+  isAccessible        Boolean           @default(false)
+  
+  // Taxi-specific fields
+  isTaxi              Boolean           @default(false)
+  taxiMeterInstalled  Boolean           @default(false)
+  taxiTopLightInstalled Boolean         @default(false)
+  
+  // Vehicle documents
+  registration        String?
+  insurance           String?
+  inspection          String?
+  
+  drivers             DriverProfile[]
+  taxiDrivers         TaxiDriverProfile[]
+  
+  @@map("vehicles")
+  DeliveryProfile DeliveryProfile[]
+}
+
+model Location {
+  id              String            @id @default(uuid())
+  latitude        Float
+  longitude       Float
+  address         String
+  city            String
+  state           String?
+  country         String
+  postalCode      String?
+  placeId         String?
+  
+  favoriteLocations FavoriteLocation[]
+  stores          Store[]
+  places          Place[]
+  deliveryPickups     Delivery[]        @relation("DeliveryPickupLocation")
+  deliveryDropoffs    Delivery[]        @relation("DeliveryDropoffLocation")
+  orderDeliveries     Order[]           @relation("OrderDeliveryLocation")
+  
+  @@map("locations")
+}
+
+model Address {
+  id                String           @id @default(uuid())
+  customerProfileId String?
+  businessId        String?
+  label             String?
+  street            String
+  city              String
+  state             String?
+  country           String
+  postalCode        String?
+  latitude          Float
+  longitude         Float
+  isDefault         Boolean          @default(false)
+  instructions      String?
+  
+  customerProfile   CustomerProfile? @relation(fields: [customerProfileId], references: [id])
+  business          Business?        @relation(fields: [businessId], references: [id])
+  
+  pickupBookings    Booking[]        @relation("PickupAddress")
+  dropoffBookings   Booking[]        @relation("DropoffAddress")
+  
+  @@map("addresses")
+}
+
+// ===== STORE & BUSINESS MODELS =====
+
+model Store {
+  id              String            @id @default(uuid())
+  name            String
+  type            StoreType
+  locationId      String
+  ownerId         String
+  contactPhone    String
+  contactEmail    String?
+  operatingHours  String
+  description     String?
+  rating          Float             @default(0)
+  isActive        Boolean           @default(true)
+  
+  location        Location          @relation(fields: [locationId], references: [id])
+  owner           StoreOwnerProfile @relation(fields: [ownerId], references: [id])
+  
+  products        Product[]
+  businessHours   BusinessHours[]
+  
+  @@map("stores")
+  Order Order[]
+}
+
+model Business {
+  id              String            @id @default(uuid())
+  name            String
+  description     String?
+  category        BusinessType
+  phone           String?
+  email           String?
+  website         String?
+  latitude        Float
+  longitude       Float
+  isActive        Boolean           @default(true)
+  isVerified      Boolean           @default(false)
+  rating          Float             @default(0)
+  
+  addresses       Address[]
+  businessProfiles BusinessProfile[]
+  reviews         Review[]
+  
+  @@map("businesses")
+}
+
+// ===== PLACE RECOMMENDATION SYSTEM =====
+
+model Place {
+  id              String        @id @default(uuid())
+  name            String
+  description     String?
+  imageUrl        String?
+  locationId      String?
+  categoryId      String
+  ownerId         String?
+  rating          Float?
+  priceLevel      PriceLevel?
+  contactInfo     String?
+  websiteUrl      String?
+  openingHours    String?
+  tags            String?
+  isActive        Boolean       @default(true)
+  isApproved      Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  
+  location        Location?     @relation(fields: [locationId], references: [id])
+  category        PlaceCategory @relation(fields: [categoryId], references: [id])
+  owner           PlaceOwnerProfile? @relation(fields: [ownerId], references: [id])
+  
+  placeVotes      PlaceVote[]
+  placeAttributes PlaceAttribute[]
+  placePhotos     PlacePhoto[]
+  categorySuggestions PlaceCategorySuggestion[]
+  
+  @@map("places")
+}
+
+model PlaceCategory {
+  id              String        @id @default(uuid())
+  name            String        @unique
+  description     String?
+  icon            String?
+  sortOrder       Int           @default(0)
+  isActive        Boolean       @default(true)
+  
+  places          Place[]
+  userPreferences UserPreferenceInsight[]
+  suggestions     PlaceCategorySuggestion[] @relation("CategorySuggestions")
+  
+  @@map("place_categories")
+}
+
+model PlaceCategorySuggestion {
+  id                    String        @id @default(uuid())
+  placeId               String
+  suggestedCategoryId   String
+  userId                String?
+  anonymousUserId       String?
+  reason                String?
+  createdAt             DateTime      @default(now())
+  
+  place                 Place         @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  suggestedCategory     PlaceCategory @relation("CategorySuggestions", fields: [suggestedCategoryId], references: [id])
+  user                  User?         @relation(fields: [userId], references: [id])
+  anonymousUser         AnonymousUser? @relation(fields: [anonymousUserId], references: [id])
+  
+  @@unique([placeId, userId, suggestedCategoryId])
+  @@unique([placeId, anonymousUserId, suggestedCategoryId])
+  @@map("place_category_suggestions")
+}
+
+model Survey {
+  id              String        @id @default(uuid())
+  userId          String?
+  user            User?         @relation(fields: [userId], references: [id])
+  anonymousUserId String?
+  anonymousUser   AnonymousUser? @relation(fields: [anonymousUserId], references: [id])
+  startedAt       DateTime      @default(now())
+  completedAt     DateTime?
+  status          SurveyStatus  @default(IN_PROGRESS)
+  
+  placeVotes      PlaceVote[]
+  
+  @@map("place_surveys")
+}
+
+model PlaceVote {
+  id              String        @id @default(uuid())
+  surveyId        String
+  placeId         String
+  isLiked         Boolean
+  userId          String?
+  anonymousUserId String?
+  createdAt       DateTime      @default(now())
+  
+  survey          Survey        @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  place           Place         @relation(fields: [placeId], references: [id])
+  user            User?         @relation(fields: [userId], references: [id])
+  anonymousUser   AnonymousUser? @relation(fields: [anonymousUserId], references: [id])
+  
+  @@unique([surveyId, placeId, userId])
+  @@unique([surveyId, placeId, anonymousUserId])
+  @@map("place_votes")
+}
+
+// ===== REVIEW & RATING SYSTEM =====
+
+model Review {
+  id         String     @id @default(uuid())
+  giverId    String
+  receiverId String?
+  bookingId  String?
+  businessId String?
+  rating     Int
+  comment    String?
+  type       ReviewType
+  
+  serviceRating    Int?
+  timelinessRating Int?
+  cleanlinessRating Int?
+  communicationRating Int?
+  
+  isVerified Boolean   @default(false)
+  isHelpful  Int       @default(0)
+  
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  
+  giver      User      @relation("ReviewGiver", fields: [giverId], references: [id])
+  receiver   User?     @relation("ReviewReceiver", fields: [receiverId], references: [id])
+  booking    Booking?  @relation(fields: [bookingId], references: [id])
+  business   Business? @relation(fields: [businessId], references: [id])
+  
+  @@map("reviews")
+}
+
+// ===== SUPPORT SYSTEM =====
+
+model SupportTicket {
+  id          String        @id @default(uuid())
+  userId      String
+  subject     String
+  description String
+  category    SupportCategory
+  priority    Priority      @default(MEDIUM)
+  status      TicketStatus  @default(OPEN)
+  assignedTo  String?
+  resolvedAt  DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  
+  user        User          @relation(fields: [userId], references: [id])
+  messages    SupportMessage[]
+  
+  @@map("support_tickets")
+}
+
+model SupportMessage {
+  id       String   @id @default(uuid())
+  ticketId String
+  userId   String?
+  message  String
+  isStaff  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  
+  ticket   SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  
+  @@map("support_messages")
+}
+
+// ===== AUDIT SYSTEM =====
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  userId      String?
+  action      String
+  resource    String
+  resourceId  String?
+  oldValues   String?
+  newValues   String?
+  ipAddress   String?
+  userAgent   String?
+  timestamp   DateTime  @default(now())
+  
+  user        User?     @relation(fields: [userId], references: [id])
+  
+  @@map("audit_logs")
+}
+
+// ===== ANALYTICS MODELS =====
+
+model DailyAnalytics {
+  id              String   @id @default(uuid())
+  date            DateTime @unique
+  totalBookings   Int      @default(0)
+  totalRevenue    Float    @default(0)
+  activeUsers     Int      @default(0)
+  averageRating   Float    @default(0)
+  completionRate  Float    @default(0)
+  cancellationRate Float   @default(0)
+  createdAt       DateTime @default(now())
+  
+  @@map("daily_analytics")
+}
+
+// ===== ADDITIONAL SUPPORTING MODELS =====
+
+model TrackingUpdate {
+  id        String   @id @default(uuid())
+  bookingId String
+  latitude  Float
+  longitude Float
+  heading   Float?
+  speed     Float?
+  status    String?
+  message   String?
+  timestamp DateTime @default(now())
+  
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  
+  @@map("tracking_updates")
+}
+
+model OrderItem {
+  id          String  @id @default(uuid())
+  bookingId   String
+  name        String
+  description String?
+  quantity    Int     @default(1)
+  unitPrice   Float
+  totalPrice  Float
+  instructions String?
+  
+  booking     Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  
+  @@map("order_items")
+  Order Order[]
+}
+
+model MovingInventoryItem {
+  id          String  @id @default(uuid())
+  bookingId   String
+  name        String
+  description String?
+  quantity    Int     @default(1)
+  weight      Float?
+  dimensions  Json?
+  isFragile   Boolean @default(false)
+  isValuable  Boolean @default(false)
+  estimatedValue Float?
+  
+  booking     Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  
+  @@map("moving_inventory_items")
+}
+
+model EmergencyContact {
+  id           String @id @default(uuid())
+  userId       String
+  name         String
+  phone        String
+  relationship String
+  isPrimary    Boolean @default(false)
+  
+  user         User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("emergency_contacts")
+}
+
+model FavoriteLocation {
+  id          String    @id @default(uuid())
+  userId      String
+  locationId  String
+  label       String
+  isDefault   Boolean   @default(false)
+  
+  user        User      @relation(fields: [userId], references: [id])
+  location    Location  @relation(fields: [locationId], references: [id])
+  
+  @@unique([userId, label])
+  @@map("favorite_locations")
+}
+
+model Subcategory {
+  id          String      @id @default(uuid())
+  name        String
+  description String?
+  imageUrl   String?
+  category    Category
+  products    Product[]   @relation("ProductSubcategory")
+  @@map("subcategories")
+}
+enum Category {
+  FOOD
+  GROCERY
+  PHARMACY
+}
+model Product {
+  id            String      @id @default(uuid())
+  storeId       String
+  name          String
+  description   String?
+  price         Float
+  category      Category
+  subcategoryId String?
+  subcategory   Subcategory? @relation("ProductSubcategory", fields: [subcategoryId], references: [id])
+  image         String?
+  inStock       Boolean     @default(true)
+  stockQuantity Int         @default(0)
+  store         Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  @@map("products")
+}
+
+model BusinessHours {
+  id        String    @id @default(uuid())
+  storeId   String
+  dayOfWeek Int
+  openTime  String
+  closeTime String
+  isClosed  Boolean   @default(false)
+  
+  store     Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  
+  @@unique([storeId, dayOfWeek])
+  @@map("business_hours")
+}
+
+model PlaceAttribute {
+  id              String        @id @default(uuid())
+  placeId         String
+  key             String
+  value           String
+  
+  place           Place         @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  
+  @@unique([placeId, key, value])
+  @@map("place_attributes")
+}
+
+model PlacePhoto {
+  id          String    @id @default(uuid())
+  placeId     String
+  photoUrl    String
+  caption     String?
+  isApproved  Boolean   @default(false)
+  uploadedBy  String?
+  uploadedAt  DateTime  @default(now())
+  
+  place       Place     @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  
+  @@map("place_photos")
+}
+
+model UserPreferenceInsight {
+  id              String        @id @default(uuid())
+  userId          String?
+  anonymousUserId String?
+  categoryId      String
+  preferenceData  String
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  
+  user            User?         @relation(fields: [userId], references: [id])
+  anonymousUser   AnonymousUser? @relation(fields: [anonymousUserId], references: [id])
+  category        PlaceCategory @relation(fields: [categoryId], references: [id])
+  
+  @@unique([userId, categoryId])
+  @@unique([anonymousUserId, categoryId])
+  @@map("user_preference_insights")
+}
+
+// Pricing and earnings models
+model PricingRule {
+  id        String      @id @default(uuid())
+  serviceTypeId String
+  name      String
+  type      PricingType
+  basePrice Float       @default(0)
+  pricePerKm Float?
+  pricePerMinute Float?
+  pricePerHour Float?
+  minimumFare Float?
+  maximumFare Float?
+  surgeMultiplier Float? @default(1.0)
+  conditions Json?
+  isActive  Boolean     @default(true)
+  validFrom DateTime?
+  validTo   DateTime?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  
+  serviceType ServiceType @relation(fields: [serviceTypeId], references: [id])
+  
+  @@map("pricing_rules")
+}
+
+model DriverEarning {
+  id              String        @id @default(uuid())
+  driverProfileId String
+  bookingId       String?
+  amount          Float
+  commission      Float
+  netEarning      Float
+  tip             Float?        @default(0)
+  bonus           Float?        @default(0)
+  date            DateTime      @default(now())
+  weekStarting    DateTime
+  monthYear       String        // Format: "2024-01" for January 2024
+  
+  driverProfile   DriverProfile @relation(fields: [driverProfileId], references: [id])
+  
+  @@map("driver_earnings")
+}
+
+model TaxiDriverEarning {
+  id                  String            @id @default(uuid())
+  taxiDriverProfileId String
+  bookingId           String?
+  amount              Float
+  commission          Float
+  netEarning          Float
+  tip                 Float?            @default(0)
+  bonus               Float?            @default(0)
+  date                DateTime          @default(now())
+  weekStarting        DateTime
+  monthYear           String            // Format: "2024-01" for January 2024
+  
+  taxiDriverProfile   TaxiDriverProfile @relation(fields: [taxiDriverProfileId], references: [id])
+  
+  @@map("taxi_driver_earnings")
+}
+
+model DeliveryEarning {
+  id                String          @id @default(uuid())
+  deliveryProfileId String
+  bookingId         String?
+  amount            Float
+  commission        Float
+  netEarning        Float
+  tip               Float?          @default(0)
+  bonus           Float?          @default(0)
+  date              DateTime        @default(now())
+  weekStarting      DateTime
+  monthYear         String          // Format: "2024-01"
+  deliveryId          String?
+  
+  deliveryProfile   DeliveryProfile @relation(fields: [deliveryProfileId], references: [id])
+  
+  @@map("delivery_earnings")
+}
+
+model MoverEarning {
+  id            String       @id @default(uuid())
+  moverProfileId String
+  bookingId     String?
+  amount        Float
+  commission    Float
+  netEarning    Float
+  tip           Float?       @default(0)
+  bonus         Float?       @default(0)
+  date          DateTime     @default(now())
+  weekStarting  DateTime
+  monthYear     String       // Format: "2024-01"
+  
+  moverProfile  MoverProfile @relation(fields: [moverProfileId], references: [id])
+  
+  @@map("mover_earnings")
+}
+
+model DeliveryDocument {
+  id                  String            @id @default(uuid())
+  deliveryProfileId   String
+  type                DocumentType
+  documentNumber      String?
+  documentUrl         String
+  expiryDate          DateTime?
+  status              DocumentStatus    @default(PENDING)
+  verifiedAt          DateTime?
+  verifiedBy          String?
+  rejectionReason     String?
+  
+  deliveryProfile     DeliveryProfile   @relation(fields: [deliveryProfileId], references: [id], onDelete: Cascade)
+  
+  @@map("delivery_documents")
+}
+
+model Delivery {
+  id                    String            @id @default(uuid())
+orderId               String            @unique
+  dispatchRiderId       String?
+  pickupLocationId      String
+  deliveryLocationId    String
+  deliveryFee           Float             @default(0)
+  estimatedPickupTime   DateTime?
+  estimatedDeliveryTime DateTime?
+  specialInstructions   String?
+  status                DeliveryStatus    @default(PENDING)
+  
+  // Timing fields
+  assignedAt            DateTime?
+  pickupStartedAt       DateTime?
+  pickedUpAt            DateTime?
+  deliveryStartedAt     DateTime?
+  deliveredAt           DateTime?
+  
+  // Completion data
+  pickupNotes           String?
+  pickupPhoto           String?
+  deliveryNotes         String?
+  deliveryPhoto         String?
+  customerSignature     String?
+  recipientName         String?
+  
+  // Financial data
+  finalDeliveryFee      Float?
+  dispatchRiderEarning  Float?
+  platformCommission    Float?
+  
+  // Relationships
+  order                 Order             @relation(fields: [orderId], references: [id])
+  dispatchRider         DeliveryProfile?  @relation(fields: [dispatchRiderId], references: [userId])
+  pickupLocation        Location          @relation("DeliveryPickupLocation", fields: [pickupLocationId], references: [id])
+  deliveryLocation      Location          @relation("DeliveryDropoffLocation", fields: [deliveryLocationId], references: [id])
+  
+  // Tracking and issues
+  trackingUpdates       DeliveryTracking[]
+  issues                DeliveryIssue[]
+  rejections            DeliveryRejection[]
+  
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  
+  @@map("deliveries")
+}
+
+model DeliveryTracking {
+  id          String    @id @default(uuid())
+  deliveryId  String
+  latitude    Float
+  longitude   Float
+  status      String
+  message     String?
+  timestamp   DateTime  @default(now())
+  
+  delivery    Delivery  @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  
+  @@map("delivery_tracking")
+}
+
+model DeliveryIssue {
+  id            String        @id @default(uuid())
+  deliveryId    String
+  dispatchRiderId String
+  issueType     String
+  description   String
+  severity      String        @default("MEDIUM")
+  location      String?       // JSON location data
+  photos        String?       // JSON array of photo URLs
+  status        String        @default("REPORTED")
+  resolvedAt    DateTime?
+  
+  delivery      Delivery      @relation(fields: [deliveryId], references: [id])
+  
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  
+  @@map("delivery_issues")
+}
+
+model DeliveryRejection {
+  id              String    @id @default(uuid())
+  deliveryId      String
+  dispatchRiderId String
+  reason          String?
+  rejectedAt      DateTime  @default(now())
+  
+  delivery        Delivery  @relation(fields: [deliveryId], references: [id])
+  
+  @@map("delivery_rejections")
+}
+
+model Order {
+  id                  String            @id @default(uuid())
+  orderNumber         String            @unique
+  customerId          String
+  storeId             String
+  deliveryLocationId  String?
+  status              OrderStatus       @default(PENDING)
+  totalAmount         Float
+  deliveryFee         Float             @default(0)
+  preparationNotes    String?
+  readyForPickupAt    DateTime?
+  
+  // Relationships
+  customer            User              @relation("CustomerOrders", fields: [customerId], references: [id])
+  store               Store             @relation(fields: [storeId], references: [id])
+  deliveryLocation    Location?         @relation("OrderDeliveryLocation", fields: [deliveryLocationId], references: [id])
+  orderItems          OrderItem[]
+  delivery            Delivery?
+  
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  
+  @@map("orders")
+}
+
+// Document management
+model DriverDocument {
+  id              String         @id @default(uuid())
+  driverProfileId String
+  type            DocumentType
+  documentNumber  String?
+  documentUrl     String
+  expiryDate      DateTime?
+  status          DocumentStatus @default(PENDING)
+  verifiedAt      DateTime?
+  verifiedBy      String?
+  rejectionReason String?
+  
+  driverProfile   DriverProfile  @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+  
+  @@map("driver_documents")
+}
+
+model TaxiDriverDocument {
+  id                  String            @id @default(uuid())
+  taxiDriverProfileId String
+  type                TaxiDocumentType
+  documentNumber      String?
+  documentUrl         String
+  expiryDate          DateTime?
+  status              DocumentStatus    @default(PENDING)
+  verifiedAt          DateTime?
+  verifiedBy          String?
+  rejectionReason     String?
+  
+  taxiDriverProfile   TaxiDriverProfile @relation(fields: [taxiDriverProfileId], references: [id], onDelete: Cascade)
+  
+  @@map("taxi_driver_documents")
+}
+
+
+
+// ===== ENHANCED SERVICE ZONE MANAGEMENT =====
+
+model ServiceZone {
+  id              String            @id @default(uuid())
+  name            String
+  displayName     String?
+  type            ServiceZoneType   @default(LOCAL)
+  category        ServiceCategory
+  isActive        Boolean           @default(true)
+  
+  // Geographic boundaries
+  boundaries      Json?             // GeoJSON polygon
+  centerLat       Float
+  centerLng       Float
+  radius          Float?            // in meters for circular zones
+  
+  // Hierarchical structure
+  parentZoneId    String?
+  parentZone      ServiceZone?      @relation("ZoneHierarchy", fields: [parentZoneId], references: [id])
+  childZones      ServiceZone[]     @relation("ZoneHierarchy")
+  
+  // Zone properties
+  timezone        String?           @default("Africa/Accra")
+  currency        String?           @default("GHS")
+  language        String?           @default("en")
+  
+  // Operational settings
+  operatingHours  Json?             // Operating hours configuration
+  isEmergencyZone Boolean           @default(false)
+  priority        Int               @default(0)
+  
+  // Inter-regional settings
+  allowsInterRegional Boolean       @default(false)
+  interRegionalFee    Float?        @default(0)
+  connectedZones      String[]      // Array of zone IDs this zone connects to
+  
+  // Pricing modifiers
+  basePriceMultiplier Float         @default(1.0)
+  surgeCapMultiplier  Float         @default(1.0)
+  
+  // Metadata
+  description     String?
+  contactInfo     Json?
+  regulations     Json?             // Local regulations and requirements
+  
+  // Relationships
+  driverServiceZones     DriverServiceZone[]
+  taxiDriverServiceZones TaxiDriverServiceZone[]
+  
+  // NEW: Booking relationships
+  originBookings         Booking[]   @relation("OriginZone")
+  destinationBookings    Booking[]   @relation("DestinationZone")
+  
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  @@map("service_zones")
+}
+
+model DriverServiceZone {
+  id            String        @id @default(uuid())
+  driverProfileId String
+  serviceZoneId String
+  
+  // Zone-specific settings
+  isActive      Boolean       @default(true)
+  canAcceptInterRegional Boolean @default(false)
+  interRegionalRate      Float?  // Special rate for inter-regional trips
+  
+  driverProfile DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+  serviceZone   ServiceZone   @relation(fields: [serviceZoneId], references: [id], onDelete: Cascade)
+  
+  @@unique([driverProfileId, serviceZoneId])
+  @@map("driver_service_zones")
+}
+
+model TaxiDriverServiceZone {
+  id                  String            @id @default(uuid())
+  taxiDriverProfileId String
+  serviceZoneId       String
+  
+  // Zone-specific settings
+  isActive            Boolean           @default(true)
+  canAcceptInterRegional Boolean       @default(false)
+  interRegionalRate   Float?            // Special rate for inter-regional trips
+  
+  taxiDriverProfile   TaxiDriverProfile @relation(fields: [taxiDriverProfileId], references: [id], onDelete: Cascade)
+  serviceZone         ServiceZone       @relation(fields: [serviceZoneId], references: [id], onDelete: Cascade)
+  
+  @@unique([taxiDriverProfileId, serviceZoneId])
+  @@map("taxi_driver_service_zones")
+}
+
+model DriverRideType {
+  id              String        @id @default(uuid())
+  driverProfileId String
+  rideType        RideType
+  isActive        Boolean       @default(true)
+  
+  driverProfile   DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+  
+  @@unique([driverProfileId, rideType])
+  @@map("driver_ride_types")
+}
+
+// ===== ENUMS =====
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum DriverType {
+  REGULAR
+  TAXI
+}
+
+enum SubscriptionTier {
+  BASIC
+  PREMIUM
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  CANCELLED
+  EXPIRED
+}
+
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+}
+
+enum CommissionStatus {
+  CURRENT
+  OVERDUE
+  SUSPENDED
+  EXEMPTED
+}
+
+enum CommissionBillStatus {
+  PENDING
+  SENT
+  PAID
+  OVERDUE
+  CANCELLED
+  DISPUTED
+}
+
+enum CommissionPaymentType {
+  MONTHLY_COMMISSION
+  LATE_FEE
+  PENALTY
+  ADJUSTMENT
+  REFUND
+}
+
+enum MobileMoneyProvider {
+  MTN_MOMO
+  AIRTEL_MONEY
+  VODAFONE_CASH
+  TIGO_CASH
+  ORANGE_MONEY
+  MPESA
+  ECOCASH
+  TELECASH
+}
+
+enum PayoutMethod {
+  BANK_TRANSFER
+  MOBILE_MONEY
+  PAYSTACK_TRANSFER
+  CASH
+  CHECK
+}
+
+enum PayoutSchedule {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  ON_DEMAND
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REVERSED
+}
+
+enum VerificationStatus {
+  PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum BackgroundCheckStatus {
+  PENDING
+  IN_PROGRESS
+  PASSED
+  FAILED
+  EXPIRED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum ServiceCategory {
+  TRANSPORTATION
+  DELIVERY
+  MOVING
+  EMERGENCY
+  SHARED
+}
+
+// NEW: Service Zone Types
+enum ServiceZoneType {
+  LOCAL           // City/town level zones
+  REGIONAL        // State/province level zones  
+  INTER_REGIONAL  // Cross-state/province zones
+  NATIONAL        // Country-wide zones
+  INTERNATIONAL   // Cross-border zones
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  DRIVER_ASSIGNED
+  DRIVER_ARRIVED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  FAILED
+  NO_DRIVER_AVAILABLE
+}
+
+enum BookingType {
+  IMMEDIATE
+  SCHEDULED
+  RECURRING
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum VehicleType {
+  CAR
+  MOTORCYCLE
+  BICYCLE
+  VAN
+  TRUCK
+  BUS
+  AMBULANCE
+  FIRE_TRUCK
+  POLICE_CAR
+  AUTO_RICKSHAW
+  SCOOTER
+  TAXI
+}
+
+enum VehicleCategory {
+  ECONOMY
+  COMFORT
+  PREMIUM
+  EXECUTIVE
+  SUV
+  XL
+  ACCESSIBLE
+  GREEN
+  COMMERCIAL
+  EMERGENCY
+  TAXI
+}
+
+enum FuelType {
+  GASOLINE
+  DIESEL
+  ELECTRIC
+  HYBRID
+  CNG
+  LPG
+}
+
+enum TransmissionType {
+  MANUAL
+  AUTOMATIC
+  CVT
+}
+
+enum RideType {
+  ECONOMY
+  COMFORT
+  PREMIUM
+  EXECUTIVE
+  SUV
+  SHARED
+  POOL
+  XL
+  ACCESSIBLE
+  GREEN
+  MOTO
+  AUTO
+  TAXI
+}
+
+enum EmergencyType {
+  POLICE
+  AMBULANCE
+  FIRE_DEPARTMENT
+  RESCUE_SERVICE
+  ROADSIDE_ASSISTANCE
+}
+
+enum StoreType {
+  GROCERY
+  PHARMACY
+  RESTAURANT
+  RETAIL
+  ELECTRONICS
+  OTHER
+}
+
+enum BusinessType {
+  RESTAURANT
+  FAST_FOOD
+  CAFE
+  GROCERY_STORE
+  PHARMACY
+  RETAIL_STORE
+  CONVENIENCE_STORE
+  SERVICE_PROVIDER
+  ENTERTAINMENT
+  HEALTHCARE
+  EDUCATION
+  GAS_STATION
+  BANK
+  ATM
+}
+
+enum PriceLevel {
+  BUDGET
+  MODERATE
+  EXPENSIVE
+  LUXURY
+}
+
+enum SurveyStatus {
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+}
+
+enum PaymentType {
+  CREDIT_CARD
+  DEBIT_CARD
+  MOBILE_MONEY
+  DIGITAL_WALLET
+  CASH
+  BANK_TRANSFER
+  BUY_NOW_PAY_LATER
+}
+
+enum TransactionType {
+  PAYMENT
+  REFUND
+  COMMISSION
+  PAYOUT
+  FEE
+  TIP
+  BONUS
+  PENALTY
+  SUBSCRIPTION
+  MONTHLY_COMMISSION
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum ReviewType {
+  SERVICE_PROVIDER
+  CUSTOMER
+  BUSINESS
+}
+
+enum PricingType {
+  FIXED
+  DISTANCE_BASED
+  TIME_BASED
+  DYNAMIC
+  HYBRID
+  SURGE
+}
+
+enum DocumentType {
+  DRIVERS_LICENSE
+  VEHICLE_REGISTRATION
+  INSURANCE_CERTIFICATE
+  VEHICLE_INSPECTION
+  BACKGROUND_CHECK
+  IDENTITY_DOCUMENT
+  PROOF_OF_ADDRESS
+  BANK_STATEMENT
+  TAX_DOCUMENT
+}
+
+enum TaxiDocumentType {
+  DRIVERS_LICENSE
+  TAXI_LICENSE
+  TAXI_PERMIT
+  VEHICLE_REGISTRATION
+  INSURANCE_CERTIFICATE
+  VEHICLE_INSPECTION
+  METER_CALIBRATION
+  BACKGROUND_CHECK
+  IDENTITY_DOCUMENT
+  PROOF_OF_ADDRESS
+  BANK_STATEMENT
+  TAX_DOCUMENT
+  TAXI_ZONE_PERMIT
+}
+
+enum DocumentStatus {
+  PENDING
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum NotificationType {
+  ACCOUNT_UPDATE
+  SECURITY_ALERT
+  BOOKING_UPDATE
+  PAYMENT_UPDATE
+  PROMOTION
+  SYSTEM_ALERT
+  EMERGENCY_ALERT
+  REVIEW_REQUEST
+  DRIVER_NEARBY
+  RIDE_REMINDER
+  DELIVERY_UPDATE
+  PLACE_RECOMMENDATION
+  SAFETY_ALERT
+  MAINTENANCE
+  COMMISSION_DUE
+  REFERRAL_BONUS
+  NO_DRIVER_AVAILABLE
+  WELCOME
+  COMMISSION_PAID
+  PAYOUT_PROCESSED
+  NEW_BOOKING_REQUEST
+  DAY_BOOKING_ASSIGNED
+  NEW_FOOD_ORDER
+  NEW_MOVING_JOB
+  BOOKING_CANCELLED
+  BOOKING_COMPLETED
+  BOOKING_STARTED
+  BOOKING_ACCEPTED
+  NEW_ORDER
+  DRIVER_ONBOARDING
+  DRIVER_VERIFIED
+  DRIVER_SUSPENDED
+  EMERGENCY_RESPONDER_VERIFIED
+  MOVER_ONBOARDING
+  MOVER_VERIFIED
+  MOVER_SUSPENDED
+  PLACE_APPROVAL_REQUIRED
+  PLACE_APPROVED
+  PLACE_REJECTED
+  NEW_REVIEW
+  REVIEW_REPORTED
+  REVIEW_MODERATED
+  STORE_OWNER_ONBOARDING
+  STORE_OWNER_VERIFIED
+  STORE_OWNER_REJECTED
+  DRIVER_APPROVED
+  ACCOUNT_SUSPENDED
+  COMMISSION_BILL_GENERATED
+  COMMISSION_OVERDUE
+  DRIVER_ARRIVED
+  TRIP_STARTED
+  TRIP_COMPLETED
+  EMERGENCY_DISPATCH
+  EMERGENCY_RESPONDER_ASSIGNED
+  EMERGENCY_STATUS_UPDATE
+  EMERGENCY_COMPLETED
+  LOYALTY_POINTS
+  REWARD_REDEEMED
+  TIER_UPGRADE
+  MOVING_JOB_ACCEPTED
+  MOVING_JOB_STARTED
+  MOVING_JOB_COMPLETED
+  SUBSCRIPTION_ACTIVATED
+  SUBSCRIPTION_RENEWED
+  VERIFICATION_APPROVED
+  DOCUMENT_SUBMITTED
+  DOCUMENT_APPROVED
+  DOCUMENT_REJECTED
+  ACCOUNT_VERIFIED
+  INTER_REGIONAL_BOOKING_REQUEST
+  INTER_REGIONAL_BOOKING_ACCEPTED
+  ZONE_TRANSFER_INITIATED
+  ZONE_TRANSFER_COMPLETED
+  DISPATCH_RIDER_ASSIGNED
+  PICKUP_STARTED
+  ORDER_PICKED_UP
+  DELIVERY_STARTED
+  ORDER_DELIVERED
+  DELIVERY_ISSUE_REPORTED
+  ORDER_READY
+  NEW_DELIVERY_REQUEST
+}
+
+enum SupportCategory {
+  TECHNICAL_ISSUE
+  PAYMENT_ISSUE
+  BOOKING_ISSUE
+  DRIVER_COMPLAINT
+  SAFETY_CONCERN
+  ACCOUNT_ISSUE
+  FEATURE_REQUEST
+  COMMISSION_INQUIRY
+  PAYOUT_ISSUE
+  INTER_REGIONAL_ISSUE
+  OTHER
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum PriorityLevel {
+  STANDARD
+  URGENT
+  CRITICAL
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+  REOPENED
+}
+
+enum DriverNotificationStatus {
+  SENT
+  DELIVERED
+  READ
+  EXPIRED
+}
+
+enum DriverNotificationResponse {
+  ACCEPTED
+  REJECTED
+  IGNORED
+  EXPIRED
+}
+
+enum DeliveryStatus {
+  PENDING
+  ASSIGNED
+  PICKUP_IN_PROGRESS
+  PICKED_UP
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+  FAILED
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY_FOR_PICKUP
+  PICKED_UP
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
