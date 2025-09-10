@@ -480,6 +480,9 @@ export class StoreService {
 
   async addProduct(storeId: string, productData: any, userId: string) {
     try {
+      logger.info(`Adding product to store ${storeId} by user ${userId}`)
+      logger.info(`Product data:`, productData)
+
       // Check store ownership
       const store = await prisma.store.findUnique({
         where: { id: storeId },
@@ -500,6 +503,8 @@ export class StoreService {
           throw new Error("Unauthorized to add products to this store")
         }
       }
+
+      logger.info(`Store ownership check passed for store ${storeId}`)
 
       if (productData.categoryId) {
         const category = await prisma.category.findUnique({
@@ -550,6 +555,8 @@ export class StoreService {
         },
       })
 
+      logger.info(`Product created successfully with ID ${product.id} for store ${storeId}`)
+
       return product
     } catch (error) {
       logger.error("Add product error:", error)
@@ -569,6 +576,15 @@ export class StoreService {
     },
   ) {
     try {
+      // Check if store exists
+      const store = await prisma.store.findUnique({
+        where: { id: storeId },
+      })
+
+      if (!store) {
+        throw new Error("Store not found")
+      }
+
       const { page, limit, search, categoryId, subcategoryId, inStock } = filters // Updated parameter name
       const skip = (page - 1) * limit
 
@@ -594,6 +610,8 @@ export class StoreService {
         where.inStock = inStock
       }
 
+      logger.info(`Get products for store ${storeId} with filters:`, { search, categoryId, subcategoryId, inStock, page, limit })
+
       const [products, total] = await Promise.all([
         prisma.product.findMany({
           where,
@@ -611,6 +629,8 @@ export class StoreService {
         }),
         prisma.product.count({ where }),
       ])
+
+      logger.info(`Found ${total} products for store ${storeId}`)
 
       return {
         products,

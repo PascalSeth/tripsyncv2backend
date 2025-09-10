@@ -18,14 +18,18 @@ const upload = multer({
     fileSize: 5 * 1024 * 1024, // 5MB limit
   },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif|webp/
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase())
-    const mimetype = allowedTypes.test(file.mimetype)
+    if (file.fieldname === 'images' || file.fieldname === 'image') {
+      const allowedTypes = /jpeg|jpg|png|gif|webp/
+      const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase())
+      const mimetype = allowedTypes.test(file.mimetype)
 
-    if (mimetype && extname) {
-      return cb(null, true)
+      if (mimetype && extname) {
+        return cb(null, true)
+      } else {
+        cb(new Error("Only image files are allowed"))
+      }
     } else {
-      cb(new Error("Only image files are allowed"))
+      cb(null, true) // Allow other fields
     }
   },
 })
@@ -37,7 +41,16 @@ export class StoreController {
   private fileUploadService = new FileUploadService()
 
   // File upload middleware
-  uploadProductImages = upload.array("images", 5) // Allow up to 5 images
+  uploadProductImages = upload.fields([
+    { name: 'name', maxCount: 1 },
+    { name: 'price', maxCount: 1 },
+    { name: 'categoryId', maxCount: 1 },
+    { name: 'description', maxCount: 1 },
+    { name: 'subcategoryId', maxCount: 1 },
+    { name: 'inStock', maxCount: 1 },
+    { name: 'stockQuantity', maxCount: 1 },
+    { name: 'images', maxCount: 5 },
+  ])
   uploadStoreImage = upload.single("image")
   uploadCategoryImage = upload.single("image")
   uploadSubcategoryImage = upload.single("image")
@@ -784,8 +797,8 @@ export class StoreController {
       const productData = req.body
 
       const images: string[] = []
-      if (req.files && Array.isArray(req.files)) {
-        for (const file of req.files) {
+      if (req.files && typeof req.files === 'object' && !Array.isArray(req.files) && req.files.images && Array.isArray(req.files.images)) {
+        for (const file of req.files.images) {
           const imageUrl = await this.fileUploadService.uploadImage(file, "products")
           images.push(imageUrl)
         }
@@ -824,9 +837,9 @@ export class StoreController {
         search: search as string,
         categoryId: category as string,
         subcategoryId: subcategoryId as string,
-        inStock: inStock === "true",
+        inStock: inStock !== undefined ? inStock === "true" : undefined,
       })
-
+      console.log('profuc', products)
       res.json({
         success: true,
         message: "Products retrieved successfully",
@@ -848,9 +861,9 @@ export class StoreController {
       const userId = req.user!.id
       const updateData = req.body
 
-      if (req.files && Array.isArray(req.files)) {
+      if (req.files && typeof req.files === 'object' && !Array.isArray(req.files) && req.files.images && Array.isArray(req.files.images)) {
         const images: string[] = []
-        for (const file of req.files) {
+        for (const file of req.files.images) {
           const imageUrl = await this.fileUploadService.uploadImage(file, "products")
           images.push(imageUrl)
         }

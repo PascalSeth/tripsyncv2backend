@@ -103,29 +103,25 @@ export const storeValidation = {
   }),
 
   addProduct: Joi.object({
-    body: Joi.object({
-      name: Joi.string().required(),
-      description: Joi.string().optional(),
-      price: Joi.number().min(0).required(),
-      categoryId: Joi.string().required(), // Changed from category to categoryId to reference Category model
-      subcategoryId: Joi.string().optional(), // Added subcategoryId validation
-      image: Joi.string().optional(),
-      inStock: Joi.boolean().optional(),
-      stockQuantity: Joi.number().min(0).optional(),
-    }),
+    name: Joi.string().required(),
+    description: Joi.string().optional(),
+    price: Joi.number().min(0).required(),
+    categoryId: Joi.string().required(), // Changed from category to categoryId to reference Category model
+    subcategoryId: Joi.string().optional(), // Added subcategoryId validation
+    image: Joi.string().optional(),
+    inStock: Joi.boolean().optional(),
+    stockQuantity: Joi.number().min(0).optional(),
   }),
 
   updateProduct: Joi.object({
-    body: Joi.object({
-      name: Joi.string().optional(),
-      description: Joi.string().optional(),
-      price: Joi.number().min(0).optional(),
-      categoryId: Joi.string().optional(), // Changed from category to categoryId to reference Category model
-      subcategoryId: Joi.string().optional(), // Added subcategoryId validation
-      image: Joi.string().optional(),
-      inStock: Joi.boolean().optional(),
-      stockQuantity: Joi.number().min(0).optional(),
-    }),
+    name: Joi.string().optional(),
+    description: Joi.string().optional(),
+    price: Joi.number().min(0).optional(),
+    categoryId: Joi.string().optional(), // Changed from category to categoryId to reference Category model
+    subcategoryId: Joi.string().optional(), // Added subcategoryId validation
+    image: Joi.string().optional(),
+    inStock: Joi.boolean().optional(),
+    stockQuantity: Joi.number().min(0).optional(),
   }),
 
   updateBusinessHours: Joi.object({

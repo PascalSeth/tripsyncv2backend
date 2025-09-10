@@ -149,6 +149,7 @@ router.post(
   "/:id/products",
   authMiddleware,
   rbacMiddleware(["STORE_OWNER", "SUPER_ADMIN"]),
+  storeController.uploadProductImages,
   validateRequest(storeValidation.addProduct),
   storeController.addProduct,
 )
@@ -159,6 +160,7 @@ router.put(
   "/:id/products/:productId",
   authMiddleware,
   rbacMiddleware(["STORE_OWNER", "SUPER_ADMIN"]),
+  storeController.uploadProductImages,
   validateRequest(storeValidation.updateProduct),
   storeController.updateProduct,
 )
