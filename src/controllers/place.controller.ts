@@ -28,8 +28,25 @@ export class PlaceController {
         openingHours,
         priceLevel,
         tags,
-        imageUrl,
       } = req.body
+
+      // Handle image file upload
+      let imageUrl = null
+      if (req.file) {
+        try {
+          imageUrl = await this.fileUploadService.uploadImage(
+            req.file,
+            `places/${Date.now()}`,
+            {
+              width: 800,
+              height: 600,
+            }
+          )
+        } catch (uploadError) {
+          logger.error("Image upload error:", uploadError)
+          // Continue without image rather than failing the entire request
+        }
+      }
 
       // Check if user can create places
       if (!userId) {
@@ -53,15 +70,43 @@ export class PlaceController {
         })
       }
 
-      // Create location first
+      // Create location with geocoding
+      let locationData: any = {
+        latitude,
+        longitude,
+        address,
+      }
+
+      // Try to geocode the coordinates to get city and country
+      try {
+        const geocodedData = await this.locationService.reverseGeocode(latitude, longitude)
+        if (geocodedData) {
+          locationData.city = geocodedData.city
+          locationData.state = geocodedData.state
+          locationData.country = geocodedData.country
+          locationData.postalCode = geocodedData.postalCode
+
+          // Update address if we got a better formatted address
+          if (geocodedData.formattedAddress && geocodedData.formattedAddress !== address) {
+            locationData.address = geocodedData.formattedAddress
+          }
+
+          logger.info(`Geocoded location: ${geocodedData.city}, ${geocodedData.country}`)
+        } else {
+          // Fallback to defaults
+          locationData.city = "Unknown"
+          locationData.country = "Unknown"
+          logger.warn(`Failed to geocode coordinates: ${latitude}, ${longitude}`)
+        }
+      } catch (geocodeError) {
+        logger.error("Geocoding error:", geocodeError)
+        // Fallback to defaults
+        locationData.city = "Unknown"
+        locationData.country = "Unknown"
+      }
+
       const location = await prisma.location.create({
-        data: {
-          latitude,
-          longitude,
-          address,
-          city: "Unknown", // You might want to geocode this
-          country: "Nigeria",
-        },
+        data: locationData,
       })
 
       // Create place

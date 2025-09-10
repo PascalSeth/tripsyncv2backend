@@ -1,9 +1,25 @@
 import { Router } from "express"
+import multer from "multer"
 import { PlaceController } from "../controllers/place.controller"
 import { validateRequest, validateQuery } from "../middleware/validation.middleware"
 import { placeValidation } from "../validations/place.validation"
 import { rbacMiddleware } from "../middleware/rbac.middleware"
 import { authMiddleware } from "../middleware/auth.middleware"
+
+// Configure multer for image uploads
+const upload = multer({
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Check if file is an image
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true)
+    } else {
+      cb(new Error('Only image files are allowed'))
+    }
+  },
+})
 
 const router = Router()
 const placeController = new PlaceController()
@@ -31,7 +47,7 @@ router.post("/vote", validateRequest(placeValidation.userVote), placeController.
 router.get("/user/votes", placeController.getUserVotes)
 
 // Place management (Place owners and admins)
-router.post("/", validateRequest(placeValidation.createPlace), placeController.createPlace)
+router.post("/", upload.single('image'), validateRequest(placeValidation.createPlace), placeController.createPlace)
 router.put("/:id", validateRequest(placeValidation.updatePlace), placeController.updatePlace)
 router.delete("/:id", placeController.deletePlace)
 

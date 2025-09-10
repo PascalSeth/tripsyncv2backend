@@ -7,8 +7,11 @@ import { DriverMatchingService } from "../services/driver-matching.service"
 import { NotificationService } from "../services/notification.service"
 import { TrackingService } from "../services/tracking.service"
 import { ServiceZoneService } from "../services/service-zone.service"
+import { WebhookService } from "../services/webhook.service"
 import logger from "../utils/logger"
 import { LocationService } from "../services/location.service"
+import { DayBookingService } from "../services/day-booking.service"
+import { WebSocketService } from "../services/websocket.service"
 
 export class BookingController {
   private bookingService = new BookingService()
@@ -18,6 +21,8 @@ export class BookingController {
   private trackingService = new TrackingService()
   private locationService = new LocationService()
   private serviceZoneService = new ServiceZoneService()
+  private dayBookingService = new DayBookingService()
+  private webhookService = new WebhookService()
 
   createBooking = async (req: AuthenticatedRequest, res: Response) => {
     try {
@@ -98,6 +103,7 @@ export class BookingController {
         scheduledAt,
         paymentMethodId,
         notes,
+        shareLocationWithEmergencyContacts = false,
         // FIXED: Remove userId from body since we get it from authenticated user
       } = req.body
 
@@ -107,7 +113,7 @@ export class BookingController {
         userRole: req.user.role,
         rideType,
         pickup: { lat: pickupLatitude, lng: pickupLongitude },
-        dropoff: { lat: dropoffLatitude, lng: dropoffLongitude },
+        dropoff: { lat: dropoffLatitude, lng: pickupLongitude },
       })
 
       // Check if this is an inter-regional booking
@@ -157,12 +163,39 @@ export class BookingController {
         }
       }
 
+      // Share location with emergency contacts if requested
+      if (shareLocationWithEmergencyContacts) {
+        try {
+          const { EmergencyService } = await import("../services/emergency.service")
+          const emergencyService = new EmergencyService()
+
+          await emergencyService.shareLocationWithEmergencyContacts(
+            userId,
+            {
+              latitude: pickupLatitude,
+              longitude: pickupLongitude,
+              address: `Ride pickup location`,
+            },
+            true, // Real-time sharing
+            booking.id
+          )
+
+          logger.info(`Location sharing enabled for booking ${booking.id} with emergency contacts`)
+        } catch (locationShareError) {
+          logger.error("Failed to enable location sharing:", locationShareError)
+          // Don't fail the booking creation, just log the error
+        }
+      }
+
       res.status(201).json({
         success: true,
         message: interRegionalCheck.route
           ? "Inter-regional ride booking created successfully"
           : "Ride booking created successfully",
-        data: booking,
+        data: {
+          ...booking,
+          locationSharingEnabled: shareLocationWithEmergencyContacts,
+        },
       })
     } catch (error) {
       logger.error("Create ride booking error:", error)
@@ -340,6 +373,19 @@ export class BookingController {
             distance: driver.distance,
           },
         })
+
+        // Send webhook notification for taxi booking request
+        try {
+          const driverProfile = await prisma.driverProfile.findFirst({
+            where: { userId: driver.driverId },
+            include: { user: true }
+          })
+          if (driverProfile) {
+            await this.webhookService.notifyTaxiBookingRequest(booking.id, booking, driverProfile)
+          }
+        } catch (webhookError) {
+          logger.warn("Failed to send taxi booking request webhook:", webhookError)
+        }
       }
     }
 
@@ -393,7 +439,6 @@ export class BookingController {
         dropoffLongitude,
         maxWaitTime = 10,
         maxDetour = 5,
-        // FIXED: Remove userId from body since we get it from authenticated user
       } = req.body
 
       logger.info("Creating shared ride booking with authenticated user:", {
@@ -406,7 +451,7 @@ export class BookingController {
         maxDetour,
       })
 
-      // Find compatible existing shared rides
+      // Find compatible existing shared rides along the same route
       const compatibleRides = await this.findCompatibleSharedRides({
         pickupLatitude,
         pickupLongitude,
@@ -418,9 +463,54 @@ export class BookingController {
       let booking
 
       if (compatibleRides.length > 0) {
-        // Join existing shared ride
-        const sharedRideGroup = (compatibleRides[0].serviceData as any)?.sharedRideGroup
+        // Join existing shared ride along the same route
+        const bestMatchRide = compatibleRides[0] // Already sorted by similarity
+        const sharedRideGroup = (bestMatchRide.serviceData as any)?.sharedRideGroup
 
+        logger.info(`🎯 Found compatible shared ride: ${bestMatchRide.id} (similarity: ${(bestMatchRide.routeSimilarity * 100).toFixed(1)}%)`)
+
+        // Fetch all current bookings in this shared ride group
+        const existingGroupBookings = await prisma.booking.findMany({
+          where: {
+            serviceData: {
+              path: ["sharedRideGroup"],
+              equals: sharedRideGroup,
+            },
+            status: { in: ["PENDING", "CONFIRMED", "DRIVER_ASSIGNED", "IN_PROGRESS"] }, // Only active bookings
+          },
+        })
+
+        const newTotalPassengers = existingGroupBookings.length + 1
+        const totalEstimatedPriceForGroup =
+          (bestMatchRide.serviceData as any)?.totalEstimatedPrice || bestMatchRide.estimatedPrice
+
+        if (!totalEstimatedPriceForGroup) {
+          throw new Error("Total estimated price for shared ride group not found.")
+        }
+
+        // Calculate even cost sharing among all passengers
+        const perPassengerCost = Math.round(totalEstimatedPriceForGroup / newTotalPassengers)
+        const originalSingleRideCost = await this.pricingService.calculateRideEstimate({
+          pickupLatitude,
+          pickupLongitude,
+          dropoffLatitude,
+          dropoffLongitude,
+          rideType: "ECONOMY", // Compare with regular economy ride
+        })
+
+        const savings = originalSingleRideCost.estimatedPrice - perPassengerCost
+
+        logger.info(`🤝 Joining shared ride group: ${sharedRideGroup}`, {
+          groupLeaderBookingId: bestMatchRide.id,
+          currentPassengers: existingGroupBookings.length,
+          newTotalPassengers,
+          totalEstimatedPriceForGroup,
+          perPassengerCost,
+          savings,
+          routeSimilarity: `${(bestMatchRide.routeSimilarity * 100).toFixed(1)}%`
+        })
+
+        // Create new booking for the joining user
         booking = await prisma.booking.create({
           data: {
             bookingNumber: await this.generateBookingNumber(),
@@ -432,36 +522,62 @@ export class BookingController {
             pickupLongitude,
             dropoffLatitude,
             dropoffLongitude,
-            estimatedPrice: compatibleRides[0].estimatedPrice * 0.7, // 30% discount
+            estimatedPrice: perPassengerCost, // Evenly shared cost
             currency: "GHS",
             serviceData: {
               sharedRideGroup,
               isGroupLeader: false,
               maxPassengers: 4,
-              estimatedSavings: compatibleRides[0].estimatedPrice * 0.3,
+              estimatedSavings: savings, // Savings compared to single ride
+              totalEstimatedPrice: totalEstimatedPriceForGroup,
+              routeSimilarity: bestMatchRide.routeSimilarity,
+              joinedAt: new Date(),
             },
           },
         })
 
-        // Update existing shared ride
+        // Update all existing bookings in the group with the new evenly shared cost
+        for (const existingBooking of existingGroupBookings) {
+          await prisma.booking.update({
+            where: { id: existingBooking.id },
+            data: {
+              estimatedPrice: perPassengerCost,
+              serviceData: {
+                ...(existingBooking.serviceData as any),
+                totalEstimatedPrice: totalEstimatedPriceForGroup,
+                updatedCostSharing: new Date(), // Track when cost was updated
+              },
+            },
+          })
+          logger.info(`💰 Updated existing booking ${existingBooking.id} to new shared cost: GH₵${perPassengerCost}`)
+        }
+
+        // Update the group leader's serviceData to reflect the new passenger count
         await prisma.booking.update({
-          where: { id: compatibleRides[0].id },
+          where: { id: bestMatchRide.id },
           data: {
             serviceData: {
-              ...(compatibleRides[0].serviceData as any),
+              ...(bestMatchRide.serviceData as any),
+              currentPassengers: newTotalPassengers,
               sharedPassengers: [
-                ...((compatibleRides[0].serviceData as any)?.sharedPassengers || []),
+                ...((bestMatchRide.serviceData as any)?.sharedPassengers || []),
                 {
                   passengerId: userId,
                   bookingId: booking.id,
                   joinedAt: new Date(),
+                  routeSimilarity: bestMatchRide.routeSimilarity,
                 },
               ],
+              lastUpdated: new Date(),
             },
           },
         })
+
+        logger.info(`✅ Successfully joined shared ride. Cost per passenger: GH₵${perPassengerCost} (${newTotalPassengers} passengers total)`)
       } else {
-        // Create new shared ride group
+        // No compatible rides found - create new shared ride group and wait for partners
+        logger.info(`🚫 No compatible shared rides found along the same route. Creating new group and waiting for partners.`)
+
         const sharedRideGroup = `shared_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
         const estimate = await this.pricingService.calculateRideEstimate({
           pickupLatitude,
@@ -471,6 +587,13 @@ export class BookingController {
           rideType: "SHARED",
         })
 
+        const totalEstimatedPrice = estimate.estimatedPrice
+
+        logger.info(`🆕 Creating new shared ride group: ${sharedRideGroup}`, {
+          totalEstimatedPrice,
+          waitingForPartners: true,
+        })
+
         booking = await prisma.booking.create({
           data: {
             bookingNumber: await this.generateBookingNumber(),
@@ -482,22 +605,50 @@ export class BookingController {
             pickupLongitude,
             dropoffLatitude,
             dropoffLongitude,
-            estimatedPrice: estimate.estimatedPrice,
+            estimatedPrice: totalEstimatedPrice, // Initially pay full price, will be adjusted when partners join
             currency: "GHS",
             serviceData: {
               sharedRideGroup,
               isGroupLeader: true,
               maxPassengers: 4,
               waitingForMorePassengers: true,
+              totalEstimatedPrice: totalEstimatedPrice,
+              currentPassengers: 1,
+              sharedPassengers: [
+                {
+                  passengerId: userId,
+                  bookingId: null, // This booking itself is the group leader
+                  joinedAt: new Date(),
+                },
+              ],
+              partnerSearchStarted: new Date(),
+              noPartnersFoundMessage: "Waiting for passengers going along the same route...",
             },
           },
         })
+
+        logger.info(`⏳ Shared ride created. Waiting for compatible passengers along the same route.`)
       }
+
+      // Prepare response based on whether partners were found
+      const hasPartners = compatibleRides.length > 0
+      const responseMessage = hasPartners
+        ? `Shared ride booking created successfully. Joined existing ride with ${compatibleRides[0].currentPassengers} other passenger(s).`
+        : "Shared ride booking created successfully. Waiting for passengers going along the same route..."
 
       res.status(201).json({
         success: true,
-        message: "Shared ride booking created successfully",
-        data: booking,
+        message: responseMessage,
+        data: {
+          ...booking,
+          sharedRideStatus: {
+            hasPartners,
+            partnerCount: hasPartners ? compatibleRides[0].currentPassengers : 0,
+            routeSimilarity: hasPartners ? compatibleRides[0].routeSimilarity : null,
+            waitingForPartners: !hasPartners,
+            estimatedSavings: hasPartners ? (booking.serviceData as any)?.estimatedSavings : 0,
+          }
+        },
       })
     } catch (error) {
       logger.error("Create shared ride error:", error)
@@ -512,86 +663,53 @@ export class BookingController {
   createDayBooking = async (req: AuthenticatedRequest, res: Response) => {
     try {
       const userId = req.user!.id
-      const { scheduledAt, duration, serviceArea, driverId, specialRequirements, contactPhone } = req.body
+      const { scheduledAt, duration, serviceArea, driverId, specialRequirements, contactPhone, pickupLatitude, pickupLongitude } = req.body
 
-      // Validate user subscription tier
-      const customerProfile = await prisma.customerProfile.findUnique({
-        where: { userId },
-      })
+      logger.info(`🚐 Enhanced day booking request from user ${userId} for driver ${driverId}`)
 
-      if (!customerProfile || !["PREMIUM", "ENTERPRISE"].includes(customerProfile.subscriptionTier)) {
-        return res.status(403).json({
-          success: false,
-          message: "Day booking requires Premium or Enterprise subscription",
-        })
-      }
+      // Validate user subscription tier - TEMPORARILY DISABLED
+      // const customerProfile = await prisma.customerProfile.findUnique({
+      //   where: { userId },
+      // })
 
-      // Calculate pricing
-      const pricing = await this.pricingService.calculateDayBookingPrice({
-        duration,
-        scheduledAt: new Date(scheduledAt),
-        serviceArea,
+      // if (!customerProfile || !["PREMIUM", "ENTERPRISE"].includes(customerProfile.subscriptionTier)) {
+      //   return res.status(403).json({
+      //     success: false,
+      //     message: "Day booking requires Premium or Enterprise subscription",
+      //   })
+      // }
+
+      // Use enhanced DayBookingService with webhook integration
+      const booking = await this.dayBookingService.createDayBooking({
+        customerId: userId,
         driverId,
+        scheduledAt: new Date(scheduledAt),
+        duration,
+        serviceArea,
+        specialRequirements,
+        contactPhone,
+        pickupLatitude,
+        pickupLongitude,
       })
 
-      // Create day booking
-      const booking = await prisma.booking.create({
-        data: {
-          bookingNumber: await this.generateBookingNumber(),
-          customerId: userId,
-          providerId: driverId,
-          serviceTypeId: await this.getServiceTypeId("DAY_BOOKING"),
-          status: "CONFIRMED",
-          type: "SCHEDULED",
-          scheduledAt: new Date(scheduledAt),
-          estimatedPrice: pricing.totalPrice,
-          finalPrice: pricing.totalPrice,
-          currency: "GHS",
-          serviceData: {
-            duration,
-            serviceArea,
-            specialRequirements,
-            contactPhone,
-            pricingBreakdown: pricing.breakdown,
-          },
-          platformCommission: pricing.totalPrice * 0.15,
-          providerEarning: pricing.totalPrice * 0.85,
-        },
-        include: {
-          provider: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              phone: true,
-            },
-          },
-        },
-      })
-
-      // Notify driver
-      await this.notificationService.notifyDriver(driverId, {
-        type: "DAY_BOOKING_ASSIGNED",
-        title: "New Day Booking",
-        body: `You have a new day booking for ${duration} hours`,
-        data: {
-          bookingId: booking.id,
-          scheduledAt,
-          duration,
-          estimatedEarning: booking.providerEarning,
-        },
-      })
+      logger.info(`✅ Enhanced day booking ${booking.id} created successfully with webhook integration`)
 
       res.status(201).json({
         success: true,
-        message: "Day booking created successfully",
-        data: booking,
+        message: "Enhanced day booking created successfully with real-time monitoring",
+        data: {
+          ...booking,
+          webhookEnabled: true,
+          realTimeTracking: true,
+          automaticReassignment: true,
+          safetyFeatures: true,
+        },
       })
     } catch (error) {
-      logger.error("Create day booking error:", error)
+      logger.error("Enhanced day booking creation error:", error)
       res.status(500).json({
         success: false,
-        message: "Failed to create day booking",
+        message: "Failed to create enhanced day booking",
         error: error instanceof Error ? error.message : "Unknown error",
       })
     }
@@ -732,290 +850,15 @@ export class BookingController {
     }
   }
 
-  acceptBooking = async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const bookingId = req.params.id
-      const providerId = req.user!.id
-
-      // Validate booking exists and is pending
-      const booking = await prisma.booking.findUnique({
-        where: { id: bookingId },
-        include: {
-          customer: true,
-          serviceType: true,
-        },
-      })
-
-      if (!booking) {
-        return res.status(404).json({
-          success: false,
-          message: "Booking not found",
-        })
-      }
-
-      if (booking.status !== "PENDING") {
-        return res.status(400).json({
-          success: false,
-          message: "Booking is not available for acceptance",
-        })
-      }
-
-      // Update booking
-      const updatedBooking = await prisma.booking.update({
-        where: { id: bookingId },
-        data: {
-          providerId,
-          status: "DRIVER_ASSIGNED",
-          acceptedAt: new Date(),
-        },
-        include: {
-          customer: true,
-          provider: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              phone: true,
-              avatar: true,
-              driverProfile: {
-                select: {
-                  rating: true,
-                  vehicle: {
-                    select: {
-                      make: true,
-                      model: true,
-                      licensePlate: true,
-                    },
-                  },
-                  currentLatitude: true,
-                  currentLongitude: true,
-                },
-              },
-            },
-          },
-          serviceType: true,
-        },
-      })
-
-      // Calculate ETA for the customer to display
-      let estimatedArrivalForCustomer: number | undefined
-      if (
-        updatedBooking.provider?.driverProfile?.currentLatitude &&
-        updatedBooking.provider?.driverProfile?.currentLongitude &&
-        updatedBooking.pickupLatitude &&
-        updatedBooking.pickupLongitude
-      ) {
-        const etaResult = await this.locationService.calculateETA(
-          updatedBooking.provider.driverProfile.currentLatitude,
-          updatedBooking.provider.driverProfile.currentLongitude,
-          updatedBooking.pickupLatitude,
-          updatedBooking.pickupLongitude,
-        )
-        estimatedArrivalForCustomer = etaResult.eta
-      }
-
-      // Update provider availability
-      await this.updateProviderAvailability(providerId, false)
-
-      // Notify customer
-      await this.notificationService.notifyCustomer(booking.customerId, {
-        type: "BOOKING_ACCEPTED",
-        title: "Booking Accepted",
-        body: "Your booking has been accepted by a service provider",
-        data: {
-          bookingId: booking.id,
-          providerName: `${updatedBooking.provider?.firstName} ${updatedBooking.provider?.lastName}`,
-          providerPhone: updatedBooking.provider?.phone,
-          providerAvatar: updatedBooking.provider?.avatar,
-          providerRating: updatedBooking.provider?.driverProfile?.rating,
-          vehicleMake: updatedBooking.provider?.driverProfile?.vehicle?.make,
-          vehicleModel: updatedBooking.provider?.driverProfile?.vehicle?.model,
-          licensePlate: updatedBooking.provider?.driverProfile?.vehicle?.licensePlate,
-          estimatedArrival: estimatedArrivalForCustomer,
-        },
-      })
-
-      // Start tracking
-      await this.trackingService.startTracking(bookingId, providerId)
-
-      res.json({
-        success: true,
-        message: "Booking accepted successfully",
-        data: updatedBooking,
-      })
-    } catch (error) {
-      logger.error("Accept booking error:", error)
-      res.status(500).json({
-        success: false,
-        message: "Failed to accept booking",
-        error: error instanceof Error ? error.message : "Unknown error",
-      })
-    }
-  }
-
-  startBooking = async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const bookingId = req.params.id
-      const providerId = req.user!.id
-
-      const booking = await prisma.booking.findUnique({
-        where: { id: bookingId },
-        include: { customer: true },
-      })
-
-      if (!booking || booking.providerId !== providerId) {
-        return res.status(404).json({
-          success: false,
-          message: "Booking not found or unauthorized",
-        })
-      }
-
-      if (booking.status !== "DRIVER_ASSIGNED" && booking.status !== "DRIVER_ARRIVED") {
-        return res.status(400).json({
-          success: false,
-          message: "Booking cannot be started at this time",
-        })
-      }
-
-      // Update booking status
-      const updatedBooking = await prisma.booking.update({
-        where: { id: bookingId },
-        data: {
-          status: "IN_PROGRESS",
-          startedAt: new Date(),
-        },
-      })
-
-      // Add tracking update
-      await this.trackingService.addTrackingUpdate(bookingId, {
-        status: "TRIP_STARTED",
-        message: "Service has started",
-        latitude: req.body.latitude || 0,
-        longitude: req.body.longitude || 0,
-      })
-
-      // Notify customer
-      await this.notificationService.notifyCustomer(booking.customerId, {
-        type: "BOOKING_STARTED",
-        title: "Service Started",
-        body: "Your service has started",
-        data: { bookingId: booking.id },
-      })
-
-      res.json({
-        success: true,
-        message: "Booking started successfully",
-        data: updatedBooking,
-      })
-    } catch (error) {
-      logger.error("Start booking error:", error)
-      res.status(500).json({
-        success: false,
-        message: "Failed to start booking",
-        error: error instanceof Error ? error.message : "Unknown error",
-      })
-    }
-  }
-
-  completeBooking = async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const bookingId = req.params.id
-      const providerId = req.user!.id
-      const { actualDistance, actualDuration, finalPrice } = req.body
-
-      const booking = await prisma.booking.findUnique({
-        where: { id: bookingId },
-        include: {
-          customer: true,
-          serviceType: true,
-        },
-      })
-
-      if (!booking || booking.providerId !== providerId) {
-        return res.status(404).json({
-          success: false,
-          message: "Booking not found or unauthorized",
-        })
-      }
-
-      if (booking.status !== "IN_PROGRESS") {
-        return res.status(400).json({
-          success: false,
-          message: "Booking is not in progress",
-        })
-      }
-
-      // Calculate final pricing if not provided
-      const calculatedFinalPrice = finalPrice || booking.estimatedPrice
-      const commission = calculatedFinalPrice * (booking.serviceType.commissionRate || 0.18)
-      const providerEarning = calculatedFinalPrice - commission
-
-      // Update booking
-      const updatedBooking = await prisma.booking.update({
-        where: { id: bookingId },
-        data: {
-          status: "COMPLETED",
-          completedAt: new Date(),
-          actualDistance,
-          actualDuration,
-          finalPrice: calculatedFinalPrice,
-          platformCommission: commission,
-          providerEarning,
-        },
-      })
-
-      // Update provider availability
-      await this.updateProviderAvailability(providerId, true)
-
-      // Process payment
-      await this.bookingService.processBookingPayment(bookingId)
-
-      // Update provider stats
-      await this.updateProviderStats(providerId, booking.serviceType.name, providerEarning)
-
-      // Add tracking update
-      await this.trackingService.addTrackingUpdate(bookingId, {
-        status: "COMPLETED",
-        message: "Service completed successfully",
-        latitude: req.body.latitude || 0,
-        longitude: req.body.longitude || 0,
-      })
-
-      // Notify customer
-      await this.notificationService.notifyCustomer(booking.customerId, {
-        type: "BOOKING_COMPLETED",
-        title: "Service Completed",
-        body: "Your service has been completed successfully",
-        data: {
-          bookingId: booking.id,
-          finalPrice: calculatedFinalPrice,
-        },
-      })
-
-      res.json({
-        success: true,
-        message: "Booking completed successfully",
-        data: updatedBooking,
-      })
-    } catch (error) {
-      logger.error("Complete booking error:", error)
-      res.status(500).json({
-        success: false,
-        message: "Failed to complete booking",
-        error: error instanceof Error ? error.message : "Unknown error",
-      })
-    }
-  }
-
   getBookings = async (req: AuthenticatedRequest, res: Response) => {
     try {
       const userId = req.user!.id
-      const { status, serviceType, dateFrom, dateTo, page = 1, limit = 10, role = "customer" } = req.query
+      const { status, serviceType, dateFrom, dateTo, page = 1, limit = 10, role = "SUPER_ADMIN" } = req.query
 
       const skip = (Number(page) - 1) * Number(limit)
       const where: any = {}
 
-      if (role === "customer") {
+      if (role === "USER") {
         where.customerId = userId
       } else {
         where.providerId = userId
@@ -1158,18 +1001,76 @@ export class BookingController {
       const { serviceType, pickupLatitude, pickupLongitude, dropoffLatitude, dropoffLongitude, rideType, scheduledAt } =
         req.body
 
+      console.log("📡 Backend: Received estimate request:", {
+        serviceType,
+        pickupLatitude,
+        pickupLongitude,
+        dropoffLatitude,
+        dropoffLongitude,
+        rideType,
+        scheduledAt,
+        userId: req.user?.id
+      })
+
       let estimate: ServiceEstimate
 
       switch (serviceType) {
         case "RIDE":
+        case "TAXI":
+          const finalRideType = serviceType === "TAXI" ? "TAXI" : rideType
+          console.log("📡 Backend: Calculating ride estimate with rideType:", finalRideType)
+
           estimate = await this.pricingService.calculateRideEstimate({
             pickupLatitude,
             pickupLongitude,
             dropoffLatitude,
             dropoffLongitude,
-            rideType,
+            rideType: finalRideType,
             scheduledAt,
           })
+
+          console.log("📡 Backend: Ride estimate calculated:", estimate)
+          break
+        case "DAY_BOOKING":
+          console.log("📡 Backend: Calculating day booking estimate")
+
+          // For day booking, we need driverId and duration from the request body
+          const { driverId, duration } = req.body
+
+          if (!driverId || !duration) {
+            return res.status(400).json({
+              success: false,
+              message: "Driver ID and duration are required for day booking estimation",
+            })
+          }
+
+          const dayBookingEstimate = await this.pricingService.calculateDayBookingPrice({
+            duration,
+            scheduledAt: scheduledAt ? new Date(scheduledAt) : new Date(),
+            serviceArea: req.body.serviceArea,
+            driverId,
+          })
+
+          // Convert day booking estimate to ServiceEstimate format
+          estimate = {
+            estimatedPrice: dayBookingEstimate.totalPrice,
+            estimatedDuration: duration * 60, // Convert hours to minutes
+            estimatedDistance: 0, // Not applicable for day booking
+            surgePricing: 1.0, // Day booking uses time multipliers instead
+            availableProviders: 1, // Single driver for day booking
+            breakdown: {
+              basePrice: dayBookingEstimate.breakdown.baseAmount,
+              distancePrice: 0, // No distance cost for day booking
+              timePrice: dayBookingEstimate.breakdown.hourlyRate * dayBookingEstimate.breakdown.duration,
+              surgeAmount: dayBookingEstimate.breakdown.weekendPremium +
+                         dayBookingEstimate.breakdown.peakHoursPremium +
+                         dayBookingEstimate.breakdown.lateNightPremium,
+              serviceFee: 0, // No additional service fee for day booking
+            },
+            stabilityMetrics: dayBookingEstimate.stabilityMetrics,
+          }
+
+          console.log("📡 Backend: Day booking estimate calculated:", estimate)
           break
         case "STORE_DELIVERY":
           estimate = await this.pricingService.calculateDeliveryEstimate({
@@ -1186,13 +1087,18 @@ export class BookingController {
           })
       }
 
+      console.log("📡 Backend: Sending estimate response:", {
+        success: true,
+        data: estimate
+      })
+
       res.json({
         success: true,
         message: "Estimate calculated successfully",
         data: estimate,
       })
     } catch (error) {
-      logger.error("Get booking estimate error:", error)
+      console.error("📡 Backend: Get booking estimate error:", error)
       res.status(500).json({
         success: false,
         message: "Failed to calculate estimate",
@@ -1339,48 +1245,6 @@ export class BookingController {
     }
   }
 
-  updateBookingTracking = async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const bookingId = req.params.id
-      const providerId = req.user!.id
-      const { latitude, longitude, heading, speed, status, message } = req.body
-
-      const booking = await prisma.booking.findUnique({
-        where: { id: bookingId },
-      })
-
-      if (!booking || booking.providerId !== providerId) {
-        return res.status(404).json({
-          success: false,
-          message: "Booking not found or unauthorized",
-        })
-      }
-
-      // Add tracking update
-      const trackingUpdate = await this.trackingService.addTrackingUpdate(bookingId, {
-        latitude,
-        longitude,
-        heading,
-        speed,
-        status,
-        message,
-      })
-
-      res.json({
-        success: true,
-        message: "Tracking updated successfully",
-        data: trackingUpdate,
-      })
-    } catch (error) {
-      logger.error("Update booking tracking error:", error)
-      res.status(500).json({
-        success: false,
-        message: "Failed to update tracking",
-        error: error instanceof Error ? error.message : "Unknown error",
-      })
-    }
-  }
-
   createTaxiBooking = async (req: AuthenticatedRequest, res: Response) => {
     try {
       const userId = req.user!.id
@@ -1431,6 +1295,7 @@ export class BookingController {
           estimatedPrice: estimatedFare.estimatedPrice,
           currency: "GHS",
           serviceData: {
+            serviceType: "TAXI",
             taxiZone,
             pricingType,
             regulatoryCompliance: {
@@ -1446,6 +1311,19 @@ export class BookingController {
       // Dispatch to nearest taxi
       const nearestTaxi = availableTaxis[0]
       await this.dispatchTaxi(booking.id, nearestTaxi.userId)
+
+      // Send webhook notification for taxi booking request
+      try {
+        const driverProfile = await prisma.driverProfile.findFirst({
+          where: { userId: nearestTaxi.userId },
+          include: { user: true }
+        })
+        if (driverProfile) {
+          await this.webhookService.notifyTaxiBookingRequest(booking.id, booking, driverProfile)
+        }
+      } catch (webhookError) {
+        logger.warn("Failed to send taxi booking request webhook:", webhookError)
+      }
 
       res.status(201).json({
         success: true,
@@ -1896,32 +1774,133 @@ export class BookingController {
     dropoffLongitude: number
     maxDetour: number
   }): Promise<any[]> {
-    // Implementation for finding compatible shared rides
-    const compatibleRides = await prisma.booking.findMany({
+    // Find shared rides that are pending and waiting for more passengers
+    const availableSharedRides = await prisma.booking.findMany({
       where: {
         serviceType: { name: "SHARED_RIDE" },
-        status: "PENDING",
-        createdAt: { gte: new Date(Date.now() - 20 * 60 * 1000) }, // Last 20 minutes
+        status: "PENDING", // Only consider pending shared rides for new joins
+        createdAt: { gte: new Date(Date.now() - 15 * 60 * 1000) }, // Last 15 minutes
+        serviceData: {
+          path: ["waitingForMorePassengers"],
+          equals: true,
+        },
       },
       include: { serviceType: true },
     })
 
-    // Filter by distance compatibility
-    return compatibleRides.filter((ride) => {
-      const pickupDistance = this.calculateDistance(
+    console.log(`🔍 Found ${availableSharedRides.length} available shared rides`)
+
+    // Filter by route similarity and capacity
+    const compatibleRides = []
+
+    for (const ride of availableSharedRides) {
+      const routeSimilarity = this.calculateRouteSimilarity(
         params.pickupLatitude,
         params.pickupLongitude,
-        ride.pickupLatitude!,
-        ride.pickupLongitude!,
-      )
-      const dropoffDistance = this.calculateDistance(
         params.dropoffLatitude,
         params.dropoffLongitude,
+        ride.pickupLatitude!,
+        ride.pickupLongitude!,
         ride.dropoffLatitude!,
-        ride.dropoffLongitude!,
+        ride.dropoffLongitude!
       )
-      return pickupDistance <= 3000 && dropoffDistance <= params.maxDetour * 1000 // Convert km to meters
-    })
+
+      // Only accept rides with high route similarity (same direction, similar path)
+      if (routeSimilarity >= 0.7) { // 70% similarity threshold
+        // Check capacity
+        const currentPassengers = (ride.serviceData as any)?.currentPassengers || 1
+        const maxPassengers = (ride.serviceData as any)?.maxPassengers || 4
+
+        if (currentPassengers < maxPassengers) {
+          compatibleRides.push({
+            ...ride,
+            routeSimilarity,
+            currentPassengers,
+            maxPassengers
+          })
+          console.log(`✅ Compatible ride found: ${ride.id} (similarity: ${(routeSimilarity * 100).toFixed(1)}%)`)
+        } else {
+          console.log(`❌ Ride ${ride.id} at capacity (${currentPassengers}/${maxPassengers})`)
+        }
+      } else {
+        console.log(`❌ Ride ${ride.id} route similarity too low: ${(routeSimilarity * 100).toFixed(1)}%`)
+      }
+    }
+
+    // Sort by route similarity (best matches first)
+    return compatibleRides.sort((a, b) => b.routeSimilarity - a.routeSimilarity)
+  }
+
+  /**
+   * Calculate route similarity between two routes
+   * Returns a value between 0-1 where 1 means identical routes
+   */
+  private calculateRouteSimilarity(
+    pickup1Lat: number, pickup1Lng: number, dropoff1Lat: number, dropoff1Lng: number,
+    pickup2Lat: number, pickup2Lng: number, dropoff2Lat: number, dropoff2Lng: number
+  ): number {
+    // Calculate bearing (direction) for both routes
+    const bearing1 = this.calculateBearing(pickup1Lat, pickup1Lng, dropoff1Lat, dropoff1Lng)
+    const bearing2 = this.calculateBearing(pickup2Lat, pickup2Lng, dropoff2Lat, dropoff2Lng)
+
+    // Calculate bearing difference (0-180 degrees)
+    const bearingDiff = Math.abs(bearing1 - bearing2)
+    const normalizedBearingDiff = Math.min(bearingDiff, 360 - bearingDiff) / 180 // 0-1 scale
+
+    // Calculate distance between pickup points
+    const pickupDistance = this.calculateDistance(pickup1Lat, pickup1Lng, pickup2Lat, pickup2Lng)
+
+    // Calculate distance between dropoff points
+    const dropoffDistance = this.calculateDistance(dropoff1Lat, dropoff1Lng, dropoff2Lat, dropoff2Lng)
+
+    // Calculate route lengths
+    const route1Length = this.calculateDistance(pickup1Lat, pickup1Lng, dropoff1Lat, dropoff1Lng)
+    const route2Length = this.calculateDistance(pickup2Lat, pickup2Lng, dropoff2Lat, dropoff2Lng)
+
+    // Routes should be similar in length (within 50%)
+    const lengthRatio = Math.min(route1Length, route2Length) / Math.max(route1Length, route2Length)
+    const lengthSimilarity = lengthRatio >= 0.5 ? 1 : lengthRatio * 2
+
+    // Pickup points should be close (within 2km)
+    const pickupSimilarity = pickupDistance <= 2000 ? 1 - (pickupDistance / 2000) : 0
+
+    // Dropoff points should be close (within 3km)
+    const dropoffSimilarity = dropoffDistance <= 3000 ? 1 - (dropoffDistance / 3000) : 0
+
+    // Bearing should be similar (within 45 degrees)
+    const bearingSimilarity = normalizedBearingDiff <= 0.25 ? 1 - (normalizedBearingDiff / 0.25) : 0
+
+    // Calculate overall similarity (weighted average)
+    const similarity = (
+      pickupSimilarity * 0.3 +      // 30% weight on pickup proximity
+      dropoffSimilarity * 0.3 +     // 30% weight on dropoff proximity
+      bearingSimilarity * 0.25 +    // 25% weight on direction similarity
+      lengthSimilarity * 0.15       // 15% weight on route length similarity
+    )
+
+    console.log(`🔍 Route similarity calculation:`)
+    console.log(`   - Pickup similarity: ${(pickupSimilarity * 100).toFixed(1)}% (${pickupDistance.toFixed(0)}m apart)`)
+    console.log(`   - Dropoff similarity: ${(dropoffSimilarity * 100).toFixed(1)}% (${dropoffDistance.toFixed(0)}m apart)`)
+    console.log(`   - Bearing similarity: ${(bearingSimilarity * 100).toFixed(1)}% (${(normalizedBearingDiff * 180).toFixed(1)}° difference)`)
+    console.log(`   - Length similarity: ${(lengthSimilarity * 100).toFixed(1)}%`)
+    console.log(`   - Overall similarity: ${(similarity * 100).toFixed(1)}%`)
+
+    return similarity
+  }
+
+  /**
+   * Calculate bearing (direction) between two points in degrees
+   */
+  private calculateBearing(lat1: number, lng1: number, lat2: number, lng2: number): number {
+    const dLng = (lng2 - lng1) * Math.PI / 180
+    const lat1Rad = lat1 * Math.PI / 180
+    const lat2Rad = lat2 * Math.PI / 180
+
+    const y = Math.sin(dLng) * Math.cos(lat2Rad)
+    const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLng)
+
+    const bearing = Math.atan2(y, x) * 180 / Math.PI
+    return (bearing + 360) % 360 // Normalize to 0-360 degrees
   }
 
   private async findAvailableTaxis(params: {
@@ -1995,5 +1974,103 @@ export class BookingController {
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 
     return R * c
+  }
+
+  getBookingStatus = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      console.log("=== GET BOOKING STATUS REQUEST ===")
+      console.log("Request user:", req.user)
+      console.log("Request params:", req.params)
+      console.log("==================================")
+
+      if (!req.user?.id) {
+        return res.status(401).json({
+          success: false,
+          message: "Authentication required",
+        })
+      }
+
+      const userId = req.user.id
+      const bookingId = req.params.id
+
+      const booking = await prisma.booking.findFirst({
+        where: {
+          id: bookingId,
+          customerId: userId,
+        },
+        include: {
+          provider: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              avatar: true,
+            },
+          },
+          serviceType: true,
+          trackingUpdates: {
+            orderBy: { timestamp: "desc" },
+            take: 10,
+          },
+        },
+      })
+
+      if (!booking) {
+        return res.status(404).json({
+          success: false,
+          message: "Booking not found",
+        })
+      }
+
+      // Get driver's current location if assigned
+      let driverLocation = null
+      if (booking.providerId) {
+        const driverProfile = await prisma.driverProfile.findFirst({
+          where: { userId: booking.providerId },
+          select: {
+            currentLatitude: true,
+            currentLongitude: true,
+            rating: true,
+          },
+        })
+
+        if (driverProfile?.currentLatitude && driverProfile?.currentLongitude) {
+          driverLocation = {
+            latitude: driverProfile.currentLatitude,
+            longitude: driverProfile.currentLongitude,
+          }
+        }
+      }
+
+      // Get vehicle details if driver is assigned
+      let vehicle = null
+      if (booking.providerId) {
+        const driverProfile = await prisma.driverProfile.findFirst({
+          where: { userId: booking.providerId },
+          include: { vehicle: true },
+        })
+        vehicle = driverProfile?.vehicle
+      }
+
+      res.json({
+        success: true,
+        message: "Booking status retrieved successfully",
+        data: {
+          ...booking,
+          driverLocation,
+          vehicle,
+          isDriverAssigned: !!booking.providerId,
+          canCancel: ["PENDING", "DRIVER_ASSIGNED"].includes(booking.status),
+        },
+      })
+    } catch (error) {
+      logger.error("Get booking status error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve booking status",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
   }
 }

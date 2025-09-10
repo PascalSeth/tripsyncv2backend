@@ -1,11 +1,13 @@
 import prisma from "../config/database"
 import { LocationService } from "./location.service"
 import { NotificationService } from "./notification.service"
+import { EmailService } from "./email.service"
 import logger from "../utils/logger"
 
 export class EmergencyService {
   private locationService = new LocationService()
   private notificationService = new NotificationService()
+  private emailService = new EmailService()
 
   async createEmergencyBooking(data: {
     customerId: string
@@ -211,6 +213,21 @@ export class EmergencyService {
         priority: "CRITICAL",
       })
 
+      // Send WebSocket notification for real-time updates
+      try {
+        const { io } = await import("../server")
+        await io.notifyUser(booking.customerId, "emergency_call_accepted", {
+          bookingId,
+          responderId,
+          responderName: `${booking.provider?.firstName} ${booking.provider?.lastName}`,
+          responderPhone: booking.provider?.phone,
+          acceptedAt: booking.acceptedAt,
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to send WebSocket notification for emergency call acceptance:", error)
+      }
+
       return booking
     } catch (error) {
       logger.error("Accept emergency call error:", error)
@@ -268,6 +285,31 @@ export class EmergencyService {
         },
         priority: "STANDARD",
       })
+
+      // Send WebSocket notification for real-time status updates
+      try {
+        const { io } = await import("../server")
+        await io.notifyUser(booking.customerId, "emergency_status_update", {
+          bookingId,
+          status: data.status,
+          notes: data.notes,
+          estimatedArrival: data.estimatedArrival,
+          responderId: data.responderId,
+          timestamp: new Date(),
+        })
+
+        // Also broadcast to emergency booking room
+        await io.emitToRoom(`emergency_booking:${bookingId}`, "emergency_status_update", {
+          bookingId,
+          status: data.status,
+          notes: data.notes,
+          estimatedArrival: data.estimatedArrival,
+          responderId: data.responderId,
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to send WebSocket notification for emergency status update:", error)
+      }
 
       return updatedBooking
     } catch (error) {
@@ -502,8 +544,35 @@ export class EmergencyService {
         },
       })
 
-      // Here you would broadcast via WebSocket to customers
-      // This is a placeholder for the actual implementation
+      // Broadcast location update via WebSocket to customers
+      try {
+        const { io } = await import("../server")
+        for (const booking of activeEmergencies) {
+          await io.notifyUser(booking.customerId, "emergency_responder_location_update", {
+            bookingId: booking.id,
+            responderId,
+            latitude: data.latitude,
+            longitude: data.longitude,
+            isOnDuty: data.isOnDuty,
+            timestamp: new Date(),
+          })
+        }
+
+        // Also broadcast to emergency booking room if it exists
+        for (const booking of activeEmergencies) {
+          await io.emitToRoom(`emergency_booking:${booking.id}`, "emergency_responder_location_update", {
+            bookingId: booking.id,
+            responderId,
+            latitude: data.latitude,
+            longitude: data.longitude,
+            isOnDuty: data.isOnDuty,
+            timestamp: new Date(),
+          })
+        }
+      } catch (error) {
+        logger.warn("Failed to broadcast emergency responder location update:", error)
+      }
+
       logger.info(`Location updated for responder ${responderId}`)
 
       return { success: true }
@@ -721,6 +790,305 @@ async onboardEmergencyResponder(data: {
     } catch (error) {
       logger.error("Get emergencies by status error:", error)
       return []
+    }
+  }
+
+  // Emergency contacts and location sharing methods
+  async addEmergencyContact(userId: string, contactData: {
+    name: string
+    phone: string
+    email?: string
+    relationship: string
+  }) {
+    try {
+      const contact = await prisma.emergencyContact.create({
+        data: {
+          userId,
+          name: contactData.name,
+          phone: contactData.phone,
+          email: contactData.email,
+          relationship: contactData.relationship,
+        },
+      })
+
+      return contact
+    } catch (error) {
+      logger.error("Add emergency contact error:", error)
+      throw error
+    }
+  }
+
+  async getEmergencyContacts(userId: string) {
+    try {
+      const contacts = await prisma.emergencyContact.findMany({
+        where: { userId },
+        // orderBy: { createdAt: "desc" },
+      })
+
+      return contacts
+    } catch (error) {
+      logger.error("Get emergency contacts error:", error)
+      throw error
+    }
+  }
+
+  async removeEmergencyContact(userId: string, contactId: string) {
+    try {
+      const contact = await prisma.emergencyContact.findFirst({
+        where: { id: contactId, userId },
+      })
+
+      if (!contact) {
+        throw new Error("Emergency contact not found")
+      }
+
+      await prisma.emergencyContact.delete({
+        where: { id: contactId },
+      })
+
+      return { success: true }
+    } catch (error) {
+      logger.error("Remove emergency contact error:", error)
+      throw error
+    }
+  }
+
+  async shareLocationWithEmergencyContacts(
+    userId: string,
+    locationData: {
+      latitude: number
+      longitude: number
+      accuracy?: number
+      address?: string
+    },
+    isRealTime: boolean = false,
+    bookingId?: string
+  ) {
+    try {
+      // Get user's emergency contacts
+      const contacts = await this.getEmergencyContacts(userId)
+
+      if (contacts.length === 0) {
+        logger.warn(`No emergency contacts found for user ${userId}`)
+        return { sharedCount: 0 }
+      }
+
+      // Store location sharing record
+      const locationShare = await prisma.emergencyLocationShare.create({
+        data: {
+          userId,
+          bookingId,
+          latitude: locationData.latitude,
+          longitude: locationData.longitude,
+          accuracy: locationData.accuracy,
+          address: locationData.address,
+          isRealTime,
+          sharedWith: contacts.map(c => c.id),
+        },
+      })
+
+      // Send real-time notifications via WebSocket if enabled
+      if (isRealTime) {
+        try {
+          const { io } = await import("../server")
+          for (const contact of contacts) {
+            await io.notifyUser(contact.id, "emergency_location_share", {
+              userId,
+              location: locationData,
+              timestamp: new Date(),
+              bookingId,
+            })
+          }
+        } catch (error) {
+          logger.warn("Failed to send real-time location share notifications:", error)
+        }
+      }
+
+      // Send email notifications to contacts with email addresses
+      const emailPromises = contacts
+        .filter(contact => contact.email)
+        .map(contact =>
+          this.sendEmergencyLocationEmail(
+            contact.email!,
+            contact.name,
+            locationData,
+            isRealTime,
+            bookingId
+          )
+        )
+
+      await Promise.all(emailPromises)
+
+      logger.info(`Location shared with ${contacts.length} emergency contacts for user ${userId}`)
+      return {
+        sharedCount: contacts.length,
+        locationShareId: locationShare.id
+      }
+    } catch (error) {
+      logger.error("Share location with emergency contacts error:", error)
+      throw error
+    }
+  }
+
+  async sendEmergencyLocationEmail(
+    email: string,
+    contactName: string,
+    locationData: {
+      latitude: number
+      longitude: number
+      accuracy?: number
+      address?: string
+    },
+    isRealTime: boolean,
+    bookingId?: string
+  ) {
+    try {
+      const locationUrl = `https://maps.google.com/?q=${locationData.latitude},${locationData.longitude}`
+
+      const subject = isRealTime
+        ? "Real-time Location Update - Emergency Contact"
+        : "Last Known Location - Emergency Contact"
+
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>${subject}</title>
+          <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f4f4f4; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; background-color: white; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+            .header { background: #dc3545; color: white; padding: 30px 20px; text-align: center; border-radius: 8px 8px 0 0; }
+            .header h1 { margin: 0; font-size: 28px; font-weight: 300; }
+            .content { padding: 30px 20px; background: #ffffff; }
+            .location-box { background: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 20px 0; }
+            .button { display: inline-block; padding: 15px 30px; background: #dc3545; color: white; text-decoration: none; border-radius: 8px; margin: 20px 0; font-weight: 600; }
+            .footer { text-align: center; padding: 20px; color: #666; font-size: 14px; border-top: 1px solid #eee; margin-top: 20px; }
+            .emergency-notice { background: #f8d7da; border: 1px solid #f5c6cb; padding: 20px; border-radius: 8px; margin: 20px 0; }
+            @media (max-width: 600px) { .container { padding: 10px; } .header, .content { padding: 20px 15px; } }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <div style="font-size: 24px; font-weight: bold; margin-bottom: 10px;">🚨 Emergency Alert</div>
+              <h1>Location Update</h1>
+            </div>
+            <div class="content">
+              <p>Dear ${contactName},</p>
+
+              <div class="emergency-notice">
+                <strong style="color: #721c24;">⚠️ Emergency Location Update</strong>
+                <p style="color: #721c24; margin: 10px 0 0 0;">
+                  ${isRealTime ? 'Real-time location sharing is active.' : 'This is the last known location.'}
+                </p>
+              </div>
+
+              <div class="location-box">
+                <h3 style="color: #856404; margin-top: 0;">📍 Current Location</h3>
+                <p><strong>Coordinates:</strong> ${locationData.latitude.toFixed(6)}, ${locationData.longitude.toFixed(6)}</p>
+                ${locationData.address ? `<p><strong>Address:</strong> ${locationData.address}</p>` : ''}
+                ${locationData.accuracy ? `<p><strong>Accuracy:</strong> ±${locationData.accuracy}m</p>` : ''}
+                <p><strong>Time:</strong> ${new Date().toLocaleString()}</p>
+              </div>
+
+              <div style="text-align: center; margin: 30px 0;">
+                <a href="${locationUrl}" class="button" target="_blank">View on Google Maps</a>
+              </div>
+
+              <p>If you believe this is an emergency situation, please contact emergency services immediately.</p>
+              ${bookingId ? `<p><strong>Related Booking:</strong> ${bookingId}</p>` : ''}
+            </div>
+            <div class="footer">
+              <p>This is an automated emergency notification from TripSync.</p>
+              <p>If you have any concerns, please contact support immediately.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+
+      await this.emailService.sendEmail(email, subject, html)
+      logger.info(`Emergency location email sent to ${email}`)
+    } catch (error) {
+      logger.error("Send emergency location email error:", error)
+      throw error
+    }
+  }
+
+  async getLocationSharingHistory(userId: string, limit: number = 50) {
+    try {
+      const history = await prisma.emergencyLocationShare.findMany({
+        where: { userId },
+        include: {
+          booking: {
+            select: {
+              id: true,
+              status: true,
+              serviceType: {
+                select: {
+                  name: true,
+                  category: true,
+                },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+      })
+
+      return history
+    } catch (error) {
+      logger.error("Get location sharing history error:", error)
+      throw error
+    }
+  }
+
+  async stopLocationSharing(userId: string, bookingId?: string) {
+    try {
+      // Update active location shares to mark them as stopped
+      const updateData: any = {
+        isRealTime: false,
+        stoppedAt: new Date(),
+      }
+
+      if (bookingId) {
+        updateData.bookingId = bookingId
+      }
+
+      const result = await prisma.emergencyLocationShare.updateMany({
+        where: {
+          userId,
+          isRealTime: true,
+          stoppedAt: null,
+          ...(bookingId && { bookingId }),
+        },
+        data: updateData,
+      })
+
+      // Notify emergency contacts that location sharing has stopped
+      try {
+        const { io } = await import("../server")
+        const contacts = await this.getEmergencyContacts(userId)
+
+        for (const contact of contacts) {
+          await io.notifyUser(contact.id, "emergency_location_sharing_stopped", {
+            userId,
+            bookingId,
+            timestamp: new Date(),
+          })
+        }
+      } catch (error) {
+        logger.warn("Failed to send location sharing stopped notifications:", error)
+      }
+
+      logger.info(`Location sharing stopped for user ${userId}, affected ${result.count} shares`)
+      return { stoppedCount: result.count }
+    } catch (error) {
+      logger.error("Stop location sharing error:", error)
+      throw error
     }
   }
 }

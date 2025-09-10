@@ -1,22 +1,24 @@
 import prisma from "../config/database"
 import { LocationService } from "./location.service"
+import { PricingService } from "./pricing.service"
 import logger from "../utils/logger"
 
 export class StoreService {
   private locationService = new LocationService()
+  private pricingService = new PricingService()
 
   async createStore(ownerId: string, storeData: any) {
     try {
       // Create location first
       const location = await prisma.location.create({
         data: {
-          latitude: storeData.latitude,
-          longitude: storeData.longitude,
-          address: storeData.address,
+          latitude: storeData.latitude , // Default to Nigeria's approximate center latitude
+          longitude: storeData.longitude, // Default to Nigeria's approximate center longitude
+          address: storeData.address || "Unknown",
           city: storeData.city || "Unknown",
-          state: storeData.state,
+          state: storeData.state || "Unknown",
           country: storeData.country || "Nigeria",
-          postalCode: storeData.postalCode,
+          postalCode: storeData.zipCode || "000000",
         },
       })
 
@@ -27,10 +29,11 @@ export class StoreService {
           type: storeData.type,
           locationId: location.id,
           ownerId,
-          contactPhone: storeData.contactPhone,
-          contactEmail: storeData.contactEmail,
+          contactPhone: storeData.phone,
+          contactEmail: storeData.email,
           operatingHours: storeData.operatingHours || "9:00 AM - 9:00 PM",
           description: storeData.description,
+          image: storeData.image,
           isActive: true,
         },
         include: {
@@ -67,30 +70,73 @@ export class StoreService {
     limit: number
     search?: string
     type?: string
-    category?: string // Category enum value
+    categoryId?: string // Changed from category to categoryId
     subcategoryId?: string
     latitude?: number
     longitude?: number
     radius?: number
     isActive?: boolean
-  }) {
+    userId?: string // Add userId for role-based filtering
+  }): Promise<{
+    stores: any[]
+    pagination: {
+      page: number
+      limit: number
+      total: number
+      totalPages: number
+    }
+  }> {
     try {
       const {
         page,
         limit,
         search,
         type,
-        category,
+        categoryId, // Updated parameter name
         subcategoryId,
         latitude,
         longitude,
         radius = 10000,
-        isActive = true,
+        isActive,
+        userId,
       } = params
       const skip = (page - 1) * limit
 
-      const where: any = { isActive }
+      const where: any = {}
 
+      // Role-based filtering
+      if (userId) {
+        const user = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { role: true },
+        })
+
+        if (user?.role === "STORE_OWNER") {
+          // Store owners can only see their own stores
+          const storeOwnerProfile = await prisma.storeOwnerProfile.findUnique({
+            where: { userId },
+            select: { id: true },
+          })
+
+          if (storeOwnerProfile) {
+            where.ownerId = storeOwnerProfile.id
+          } else {
+            // If no store owner profile, return empty result
+            return {
+              stores: [],
+              pagination: {
+                page,
+                limit,
+                total: 0,
+                totalPages: 0,
+              },
+            }
+          }
+        }
+        // SUPER_ADMIN and CITY_ADMIN can see all stores (no additional filtering)
+      }
+
+      // Apply other filters
       if (search) {
         where.OR = [
           { name: { contains: search, mode: "insensitive" } },
@@ -99,17 +145,16 @@ export class StoreService {
       }
 
       if (type) {
+        logger.info(`Applying type filter: ${type}`)
         where.type = type
+      } else {
+        logger.info(`No type filter applied`)
       }
 
-      // Filter by category or subcategory through products
-      if (category || subcategoryId) {
-        where.products = {
-          some: {
-            ...(category && { category }),
-            ...(subcategoryId && { subcategoryId }),
-          },
-        }
+      // Only apply isActive filter for authenticated users
+      // Unauthenticated users can see all stores
+      if (userId && isActive !== undefined) {
+        where.isActive = isActive
       }
 
       let stores = await prisma.store.findMany({
@@ -129,10 +174,9 @@ export class StoreService {
           products: {
             take: 5, // Get first 5 products for preview
             include: {
+              category: true, // Include category model instead of subcategory.category
               subcategory: {
-                select: {
-                  id: true,
-                  name: true,
+                include: {
                   category: true,
                 },
               },
@@ -149,29 +193,122 @@ export class StoreService {
         orderBy: { name: "asc" },
       })
 
-      // Filter by location if coordinates provided
-      if (latitude && longitude) {
-        stores = stores.filter((store) => {
-          if (!store.location) return false
-          const distance = this.locationService.calculateDistance(
-            latitude,
-            longitude,
-            store.location.latitude,
-            store.location.longitude,
-          )
-          return distance <= radius
-        })
-      }
+      // Get total count before location filtering
+      let total = await prisma.store.count({ where })
 
-      const total = await prisma.store.count({ where })
+      // Apply location-based filtering if coordinates are provided
+      if (latitude !== undefined && longitude !== undefined && radius !== undefined) {
+        // For location filtering, we need to get all stores first to filter by distance
+        const allStores = await prisma.store.findMany({
+          where,
+          include: {
+            location: true,
+            owner: {
+              include: {
+                user: {
+                  select: {
+                    firstName: true,
+                    lastName: true,
+                  },
+                },
+              },
+            },
+            products: {
+              take: 5,
+              include: {
+                category: true,
+                subcategory: {
+                  include: {
+                    category: true,
+                  },
+                },
+              },
+            },
+            _count: {
+              select: {
+                products: true,
+              },
+            },
+          },
+        })
+
+        logger.info(`Location filtering: center (${latitude}, ${longitude}), radius: ${radius}m`)
+        logger.info(`Found ${allStores.length} stores before location filtering`)
+        logger.info(`Store details before filtering:`)
+        allStores.forEach(store => {
+          logger.info(`- ${store.name} (${store.type}): (${store.location?.latitude}, ${store.location?.longitude})`)
+        })
+
+        // Filter by distance and add distance to store objects
+        const storesWithDistance = await Promise.all(
+          allStores
+            .filter((store) => {
+              if (!store.location?.latitude || !store.location?.longitude) {
+                logger.info(`Store ${store.id} (${store.name}) has no location data`)
+                return false
+              }
+              return true
+            })
+            .map(async (store) => {
+              // Calculate driving distance using Google Maps
+              const distance = await this.locationService.calculateDrivingDistance(
+                latitude,
+                longitude,
+                store.location.latitude,
+                store.location.longitude
+              )
+
+              const withinRadius = distance <= radius
+              logger.info(`Store ${store.id} (${store.name}): location (${store.location.latitude}, ${store.location.longitude}), driving distance: ${distance.toFixed(2)}m, within radius: ${withinRadius}`)
+
+              if (!withinRadius) {
+                return null // Will be filtered out
+              }
+
+              // Calculate delivery fee using pricing service
+              const deliveryEstimate = await this.pricingService.calculateDeliveryEstimate({
+                pickupLatitude: store.location.latitude,
+                pickupLongitude: store.location.longitude,
+                dropoffLatitude: latitude,
+                dropoffLongitude: longitude,
+                deliveryType: "PACKAGE"
+              })
+
+              // Calculate delivery time based on distance
+              const deliveryTimeMinutes = Math.max(15, Math.min(60, Math.round(distance / 1000 * 2) + 15)) // 2 min per km + 15 min base, capped at 15-60 min
+
+              return {
+                ...store,
+                distance: Math.round(distance / 1000 * 10) / 10, // Convert to km and round to 1 decimal place
+                deliveryTime: `${deliveryTimeMinutes} min`, // Dynamic delivery time based on distance
+                deliveryFee: deliveryEstimate.estimatedPrice, // Dynamic delivery fee calculation
+              }
+            })
+        )
+
+        // Filter out null values (stores outside radius)
+        stores = storesWithDistance.filter(store => store !== null)
+
+        logger.info(`After location filtering: ${stores.length} stores`)
+        logger.info(`Filtered store details:`)
+        stores.forEach(store => {
+          logger.info(`- ${store.name} (${store.type}): (${store.location?.latitude}, ${store.location?.longitude})`)
+        })
+
+        // Update total to reflect filtered count
+        total = stores.length
+
+        // Apply pagination to filtered results
+        stores = stores.slice(skip, skip + limit)
+      }
 
       return {
         stores,
         pagination: {
           page,
           limit,
-          total: latitude && longitude ? stores.length : total,
-          totalPages: Math.ceil((latitude && longitude ? stores.length : total) / limit),
+          total,
+          totalPages: Math.ceil(total / limit),
         },
       }
     } catch (error) {
@@ -354,19 +491,31 @@ export class StoreService {
       }
 
       if (store.owner.userId !== userId) {
-        throw new Error("Unauthorized to add products to this store")
+        // Check if user is admin
+        const user = await prisma.user.findUnique({
+          where: { id: userId },
+        })
+
+        if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+          throw new Error("Unauthorized to add products to this store")
+        }
       }
 
-      // Validate category enum
-      const validCategories = ["FOOD", "GROCERY", "PHARMACY"]
-      if (productData.category && !validCategories.includes(productData.category)) {
-        throw new Error("Invalid category. Must be one of: FOOD, GROCERY, PHARMACY")
+      if (productData.categoryId) {
+        const category = await prisma.category.findUnique({
+          where: { id: productData.categoryId },
+        })
+
+        if (!category) {
+          throw new Error("Invalid category ID. Category does not exist.")
+        }
       }
 
       // Validate subcategory if provided
       if (productData.subcategoryId) {
         const subcategory = await prisma.subcategory.findUnique({
           where: { id: productData.subcategoryId },
+          include: { category: true },
         })
 
         if (!subcategory) {
@@ -374,7 +523,7 @@ export class StoreService {
         }
 
         // Ensure subcategory matches the product category
-        if (productData.category && subcategory.category !== productData.category) {
+        if (productData.categoryId && subcategory.categoryId !== productData.categoryId) {
           throw new Error("Subcategory does not match the product category")
         }
       }
@@ -385,17 +534,16 @@ export class StoreService {
           name: productData.name,
           description: productData.description,
           price: productData.price,
-          category: productData.category,
+          categoryId: productData.categoryId,
           subcategoryId: productData.subcategoryId,
           image: productData.image,
           inStock: productData.inStock !== false,
           stockQuantity: productData.stockQuantity || 0,
         },
         include: {
+          category: true,
           subcategory: {
-            select: {
-              id: true,
-              name: true,
+            include: {
               category: true,
             },
           },
@@ -415,13 +563,13 @@ export class StoreService {
       page: number
       limit: number
       search?: string
-      category?: string
+      categoryId?: string // Changed from category to categoryId
       subcategoryId?: string
       inStock?: boolean
     },
   ) {
     try {
-      const { page, limit, search, category, subcategoryId, inStock } = filters
+      const { page, limit, search, categoryId, subcategoryId, inStock } = filters // Updated parameter name
       const skip = (page - 1) * limit
 
       const where: any = { storeId }
@@ -433,8 +581,9 @@ export class StoreService {
         ]
       }
 
-      if (category) {
-        where.category = category
+      if (categoryId) {
+        // Updated to use categoryId
+        where.categoryId = categoryId
       }
 
       if (subcategoryId) {
@@ -449,10 +598,9 @@ export class StoreService {
         prisma.product.findMany({
           where,
           include: {
+            category: true, // Include category model
             subcategory: {
-              select: {
-                id: true,
-                name: true,
+              include: {
                 category: true,
               },
             },
@@ -496,14 +644,23 @@ export class StoreService {
       }
 
       if (product.store.owner.userId !== userId) {
-        throw new Error("Unauthorized to update this product")
+        // Check if user is admin
+        const user = await prisma.user.findUnique({
+          where: { id: userId },
+        })
+
+        if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+          throw new Error("Unauthorized to update this product")
+        }
       }
 
-      // Validate category enum if provided
-      if (updateData.category) {
-        const validCategories = ["FOOD", "GROCERY", "PHARMACY"]
-        if (!validCategories.includes(updateData.category)) {
-          throw new Error("Invalid category. Must be one of: FOOD, GROCERY, PHARMACY")
+      if (updateData.categoryId) {
+        const category = await prisma.category.findUnique({
+          where: { id: updateData.categoryId },
+        })
+
+        if (!category) {
+          throw new Error("Invalid category ID. Category does not exist.")
         }
       }
 
@@ -511,6 +668,7 @@ export class StoreService {
       if (updateData.subcategoryId) {
         const subcategory = await prisma.subcategory.findUnique({
           where: { id: updateData.subcategoryId },
+          include: { category: true },
         })
 
         if (!subcategory) {
@@ -518,8 +676,8 @@ export class StoreService {
         }
 
         // Ensure subcategory matches the product category
-        const categoryToCheck = updateData.category || product.category
-        if (categoryToCheck && subcategory.category !== categoryToCheck) {
+        const categoryToCheck = updateData.categoryId || product.categoryId
+        if (categoryToCheck && subcategory.categoryId !== categoryToCheck) {
           throw new Error("Subcategory does not match the product category")
         }
       }
@@ -528,10 +686,9 @@ export class StoreService {
         where: { id: productId },
         data: updateData,
         include: {
+          category: true, // Include category model
           subcategory: {
-            select: {
-              id: true,
-              name: true,
+            include: {
               category: true,
             },
           },
@@ -562,7 +719,14 @@ export class StoreService {
       }
 
       if (product.store.owner.userId !== userId) {
-        throw new Error("Unauthorized to delete this product")
+        // Check if user is admin
+        const user = await prisma.user.findUnique({
+          where: { id: userId },
+        })
+
+        if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+          throw new Error("Unauthorized to delete this product")
+        }
       }
 
       await prisma.product.delete({
@@ -692,10 +856,10 @@ export class StoreService {
 
       // Category breakdown
       const categoryBreakdown = await prisma.product.groupBy({
-        by: ["category"],
+        by: ["categoryId"],
         where: { storeId },
         _count: {
-          category: true,
+          categoryId: true,
         },
       })
 
@@ -739,7 +903,14 @@ export class StoreService {
       }
 
       if (product.store.owner.userId !== data.userId) {
-        throw new Error("Unauthorized to update inventory for this product")
+        // Check if user is admin
+        const user = await prisma.user.findUnique({
+          where: { id: data.userId },
+        })
+
+        if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+          throw new Error("Unauthorized to update inventory for this product")
+        }
       }
 
       let newStockQuantity: number
@@ -801,7 +972,14 @@ export class StoreService {
       }
 
       if (store.owner.userId !== params.userId) {
-        throw new Error("Unauthorized to view products for this store")
+        // Check if user is admin
+        const user = await prisma.user.findUnique({
+          where: { id: params.userId },
+        })
+
+        if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+          throw new Error("Unauthorized to view products for this store")
+        }
       }
 
       const products = await prisma.product.findMany({

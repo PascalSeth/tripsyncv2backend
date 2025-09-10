@@ -20,10 +20,28 @@ export class DriverController {
   onboardDriver = async (req: AuthenticatedRequest, res: Response) => {
     try {
       // Log incoming request data for debugging
-      console.log("=== DRIVER ONBOARDING REQUEST ===")
-      console.log("Request body:", JSON.stringify(req.body, null, 2))
-      console.log("Request user:", req.user)
-      console.log("Request headers:", req.headers)
+      console.log("=== DRIVER ONBOARDING REQUEST RECEIVED ===")
+      console.log("Timestamp:", new Date().toISOString())
+      console.log("Method:", req.method)
+      console.log("URL:", req.url)
+      console.log("Headers:", JSON.stringify(req.headers, null, 2))
+      console.log("Raw Body:", JSON.stringify(req.body, null, 2))
+      console.log("Body Keys:", Object.keys(req.body || {}))
+      console.log("User from auth:", req.user)
+      console.log("Content-Type:", req.headers['content-type'])
+      console.log("Content-Length:", req.headers['content-length'])
+      console.log("=====================================")
+
+      // Log specific fields that might be causing issues
+      console.log("=== SPECIFIC FIELD ANALYSIS ===")
+      console.log("licenseExpiry received:", req.body?.licenseExpiry)
+      console.log("licenseExpiry type:", typeof req.body?.licenseExpiry)
+      console.log("dateOfBirth received:", req.body?.dateOfBirth)
+      console.log("dateOfBirth type:", typeof req.body?.dateOfBirth)
+      console.log("vehicleInfo received:", req.body?.vehicleInfo)
+      console.log("preferredServiceZones received:", req.body?.preferredServiceZones)
+      console.log("preferredServiceZones type:", typeof req.body?.preferredServiceZones)
+      console.log("preferredServiceZones length:", Array.isArray(req.body?.preferredServiceZones) ? req.body.preferredServiceZones.length : 'N/A')
       console.log("=====================================")
 
       // Ensure default service zones exist
@@ -36,13 +54,14 @@ export class DriverController {
         firstName,
         lastName,
         password,
+        confirmPassword,
         gender,
         dateOfBirth,
         // Driver data
         licenseNumber,
         licenseExpiry,
         licenseClass,
-        driverType = "REGULAR",
+        driverType,
         vehicleInfo,
         // bankDetails,
         // emergencyContact,
@@ -65,6 +84,30 @@ export class DriverController {
         interRegionalRate,
       } = req.body
 
+      // Validate password confirmation
+      if (password && confirmPassword && password !== confirmPassword) {
+        console.log("❌ PASSWORD VALIDATION FAILED: Passwords do not match")
+        return res.status(400).json({
+          success: false,
+          message: "Passwords do not match",
+        })
+      }
+
+      console.log("✅ Password validation passed")
+
+      // Route to appropriate controller based on driverType
+      if (driverType === "TAXI") {
+        console.log("=== HANDLING TAXI DRIVER ONBOARDING ===")
+        // Handle taxi driver onboarding directly
+        return await this.handleTaxiDriverOnboarding(req, res)
+      } else if (driverType === "DISPATCH_RIDER") {
+        // Route to dispatch rider controller
+        const { DispatchRiderController } = await import("./dispatch-rider.controller")
+        const dispatchController = new DispatchRiderController()
+        return await dispatchController.onboardDispatchRider(req, res)
+      }
+
+      // Continue with regular driver onboarding for "REGULAR" or default
       // Log extracted data
       console.log("=== EXTRACTED DATA ===")
       console.log("preferredServiceZones:", preferredServiceZones)
@@ -72,6 +115,47 @@ export class DriverController {
       console.log("currentLongitude:", currentLongitude)
       console.log("driverType:", driverType)
       console.log("canAcceptInterRegional:", canAcceptInterRegional)
+      console.log("licenseExpiry:", licenseExpiry)
+      console.log("dateOfBirth:", dateOfBirth)
+      console.log("vehicleInfo:", vehicleInfo)
+      console.log("=====================")
+
+      // Validate required fields
+      console.log("=== VALIDATION CHECKS ===")
+      const requiredFields = {
+        email, phone, firstName, lastName, licenseNumber, licenseExpiry, licenseClass, driverType,
+        vehicleInfo: { make: vehicleInfo?.make, model: vehicleInfo?.model, year: vehicleInfo?.year, licensePlate: vehicleInfo?.licensePlate, color: vehicleInfo?.color, type: vehicleInfo?.type },
+        currentLatitude, currentLongitude
+      }
+      console.log("Required fields check:", JSON.stringify(requiredFields, null, 2))
+
+      // Check for missing required fields
+      const missingFields = []
+      if (!email) missingFields.push('email')
+      if (!phone) missingFields.push('phone')
+      if (!firstName) missingFields.push('firstName')
+      if (!lastName) missingFields.push('lastName')
+      if (!licenseNumber) missingFields.push('licenseNumber')
+      if (!licenseExpiry) missingFields.push('licenseExpiry')
+      if (!licenseClass) missingFields.push('licenseClass')
+      if (!driverType) missingFields.push('driverType')
+      if (!vehicleInfo?.make) missingFields.push('vehicleInfo.make')
+      if (!vehicleInfo?.model) missingFields.push('vehicleInfo.model')
+      if (!vehicleInfo?.year) missingFields.push('vehicleInfo.year')
+      if (!vehicleInfo?.licensePlate) missingFields.push('vehicleInfo.licensePlate')
+      if (!vehicleInfo?.color) missingFields.push('vehicleInfo.color')
+      if (!currentLatitude) missingFields.push('currentLatitude')
+      if (!currentLongitude) missingFields.push('currentLongitude')
+
+      if (missingFields.length > 0) {
+        console.log("❌ MISSING REQUIRED FIELDS:", missingFields)
+        return res.status(400).json({
+          success: false,
+          message: `Missing required fields: ${missingFields.join(', ')}`,
+          missingFields
+        })
+      }
+      console.log("✅ All required fields present")
       console.log("=====================")
 
       // Check if this is for an existing user or creating a new one
@@ -424,11 +508,281 @@ export class DriverController {
         },
       })
     } catch (error) {
+      console.log("=== DRIVER ONBOARDING ERROR ===")
+      console.log("Error type:", typeof error)
+      console.log("Error instanceof Error:", error instanceof Error)
+      console.log("Error message:", error instanceof Error ? error.message : "Unknown error")
+      console.log("Error stack:", error instanceof Error ? error.stack : "No stack")
+      console.log("Full error object:", JSON.stringify(error, null, 2))
+      console.log("=====================================")
+
       logger.error("Driver onboarding error:", error)
       res.status(500).json({
         success: false,
         message: "Driver onboarding failed",
         error: error instanceof Error ? error.message : "Unknown error",
+        timestamp: new Date().toISOString(),
+      })
+    }
+  }
+
+  private async handleTaxiDriverOnboarding(req: AuthenticatedRequest, res: Response) {
+    try {
+      console.log("=== TAXI DRIVER ONBOARDING START ===")
+
+      const {
+        // User data
+        email,
+        phone,
+        firstName,
+        lastName,
+        password,
+        dateOfBirth,
+        gender,
+        // Driver data
+        licenseNumber,
+        licenseExpiry,
+        licenseClass,
+        taxiLicenseNumber,
+        taxiLicenseExpiry,
+        taxiPermitNumber,
+        taxiPermitExpiry,
+        taxiZone,
+        meterNumber,
+        operatingHours,
+        // Vehicle Information
+        vehicleInfo,
+        // Location for zone detection
+        currentLatitude,
+        currentLongitude,
+        // Preferences
+        acceptsSharedRides = true,
+        acceptsCash = true,
+        maxRideDistance,
+        canAcceptInterRegional = false,
+      } = req.body
+
+      // Check if this is for an existing user or creating a new one
+      let userId = req.user?.id
+      let user = null
+
+      if (!userId) {
+        // Create new user for taxi driver onboarding
+        if (!email || !phone || !firstName || !lastName) {
+          return res.status(400).json({
+            success: false,
+            message: "Email, phone, firstName, and lastName are required for new taxi driver registration",
+          })
+        }
+
+        // Check if user already exists by email OR phone
+        const existingUser = await prisma.user.findFirst({
+          where: {
+            OR: [{ email }, { phone }],
+          },
+        })
+
+        if (existingUser) {
+          // User exists, check if they already have a taxi driver profile
+          const existingTaxiDriverProfile = await prisma.taxiDriverProfile.findUnique({
+            where: { userId: existingUser.id },
+          })
+
+          if (existingTaxiDriverProfile) {
+            return res.status(400).json({
+              success: false,
+              message: "User already has a taxi driver profile",
+            })
+          }
+
+          // User exists but no taxi driver profile, use existing user
+          userId = existingUser.id
+          user = existingUser
+
+          // Update existing user with additional taxi driver info if provided
+          user = await prisma.user.update({
+            where: { id: userId },
+            data: {
+              role: "TAXI_DRIVER",
+              ...(firstName && firstName !== existingUser.firstName && { firstName }),
+              ...(lastName && lastName !== existingUser.lastName && { lastName }),
+              ...(phone && phone !== existingUser.phone && { phone }),
+              ...(gender && !existingUser.gender && { gender }),
+              ...(dateOfBirth && !existingUser.dateOfBirth && { dateOfBirth: new Date(dateOfBirth) }),
+              subscriptionStatus: "ACTIVE",
+              subscriptionTier: "BASIC",
+              nextCommissionDue: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+              commissionBalance: 0,
+              isCommissionCurrent: true,
+            },
+          })
+        } else {
+          // Generate referral code
+          const referralCode = `TAXI${Date.now().toString().slice(-6)}`
+
+          // Create new user
+          user = await prisma.user.create({
+            data: {
+              email,
+              phone,
+              firstName,
+              lastName,
+              passwordHash: password ? await bcrypt.hash(password, 12) : null,
+              gender: gender || null,
+              dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+              role: "TAXI_DRIVER",
+              referralCode,
+              isActive: true,
+              isVerified: false,
+              subscriptionStatus: "ACTIVE",
+              subscriptionTier: "BASIC",
+              nextCommissionDue: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+              commissionBalance: 0,
+              isCommissionCurrent: true,
+            },
+          })
+
+          userId = user.id
+        }
+      } else {
+        // Check if driver profile already exists for existing authenticated user
+        const existingProfile = await prisma.taxiDriverProfile.findUnique({
+          where: { userId },
+        })
+
+        if (existingProfile) {
+          return res.status(400).json({
+            success: false,
+            message: "Taxi driver profile already exists for this user",
+          })
+        }
+
+        // Update existing authenticated user role to TAXI_DRIVER
+        user = await prisma.user.update({
+          where: { id: userId },
+          data: {
+            role: "TAXI_DRIVER",
+          },
+        })
+      }
+
+      console.log("✅ User setup complete for taxi driver:", userId)
+
+      // Create taxi driver profile
+      const taxiDriverProfile = await prisma.taxiDriverProfile.create({
+        data: {
+          userId,
+          licenseNumber,
+          licenseExpiry: new Date(licenseExpiry),
+          licenseClass,
+          taxiLicenseNumber: taxiLicenseNumber || licenseNumber,
+          taxiLicenseExpiry: taxiLicenseExpiry ? new Date(taxiLicenseExpiry) : new Date(licenseExpiry),
+          taxiPermitNumber,
+          taxiPermitExpiry: taxiPermitExpiry ? new Date(taxiPermitExpiry) : null,
+          taxiZone,
+          meterNumber,
+          operatingHours: operatingHours ? JSON.stringify(operatingHours) : undefined,
+          isAvailable: false,
+          isOnline: false,
+          rating: 5.0,
+          totalRides: 0,
+          totalEarnings: 0,
+          isVerified: false,
+          verificationStatus: "PENDING",
+          acceptsCash,
+          maxRideDistance: maxRideDistance || null,
+          backgroundCheckStatus: "PENDING",
+        },
+      })
+
+      console.log("✅ Taxi driver profile created:", taxiDriverProfile.id)
+
+      // Create vehicle if provided
+      if (vehicleInfo) {
+        console.log("=== CREATING TAXI VEHICLE ===")
+        console.log("vehicleInfo:", JSON.stringify(vehicleInfo, null, 2))
+
+        const vehicle = await prisma.vehicle.create({
+          data: {
+            make: vehicleInfo.make,
+            model: vehicleInfo.model,
+            year: vehicleInfo.year ? Number.parseInt(vehicleInfo.year.toString()) : new Date().getFullYear(),
+            licensePlate: vehicleInfo.licensePlate,
+            color: vehicleInfo.color,
+            type: "TAXI",
+            category: "TAXI",
+            isTaxi: true,
+            taxiMeterInstalled: vehicleInfo.taxiMeterInstalled || true,
+            taxiTopLightInstalled: vehicleInfo.taxiTopLightInstalled || true,
+            isActive: true,
+            isVerified: false,
+            capacity: vehicleInfo.capacity || 4,
+            fuelType: vehicleInfo.fuelType || "GASOLINE",
+            transmission: vehicleInfo.transmission || "AUTOMATIC",
+          },
+        })
+
+        // Link vehicle to taxi driver profile
+        await prisma.taxiDriverProfile.update({
+          where: { id: taxiDriverProfile.id },
+          data: { vehicleId: vehicle.id },
+        })
+
+        console.log("✅ Taxi vehicle created and linked:", vehicle.id)
+      }
+
+      // Send verification notification
+      await this.notificationService.notifyDriver(userId, {
+        type: "SYSTEM_ALERT",
+        title: "Taxi Driver Application Submitted",
+        body: `Your taxi driver application has been submitted for review. We'll notify you once it's approved.`,
+        priority: "STANDARD",
+      })
+
+      // Get complete profile data to return
+      const completeProfile = await prisma.taxiDriverProfile.findUnique({
+        where: { id: taxiDriverProfile.id },
+        include: {
+          user: {
+            select: {
+              id: true,
+              email: true,
+              phone: true,
+              firstName: true,
+              lastName: true,
+              avatar: true,
+              role: true,
+              isVerified: true,
+            },
+          },
+          vehicle: true,
+        },
+      })
+
+      console.log("=== TAXI DRIVER ONBOARDING COMPLETE ===")
+      console.log("Profile ID:", taxiDriverProfile.id)
+      console.log("User ID:", userId)
+      console.log("=====================================")
+
+      res.status(201).json({
+        success: true,
+        message: user?.email === email
+          ? "Taxi driver profile added to existing user successfully"
+          : "Taxi driver onboarding completed successfully",
+        data: {
+          user: completeProfile?.user,
+          taxiDriverProfile: completeProfile,
+        },
+      })
+    } catch (error) {
+      console.log("=== TAXI DRIVER ONBOARDING ERROR ===")
+      console.log("Error details:", error)
+      logger.error("Taxi driver onboarding error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Taxi driver onboarding failed",
+        error: error instanceof Error ? error.message : "Unknown error",
+        timestamp: new Date().toISOString(),
       })
     }
   }
@@ -511,16 +865,20 @@ export class DriverController {
         })
       }
 
-      // Broadcast availability update via Socket.IO
-      const { io } = await import("../server")
-      io.emit("driver_availability_update", {
-        driverId: userId,
-        isAvailable,
-        isOnline,
-        location: currentLatitude && currentLongitude ? { currentLatitude, currentLongitude } : null,
-        zone: detectedZone,
-        zoneChanged,
-      })
+      // Broadcast availability update via WebSocket
+      try {
+        const { io } = await import("../server")
+        await io.broadcastToRole("USER", "driver_availability_update", {
+          driverId: userId,
+          isAvailable,
+          isOnline,
+          location: currentLatitude && currentLongitude ? { currentLatitude, currentLongitude } : null,
+          zone: detectedZone,
+          zoneChanged,
+        })
+      } catch (error) {
+        logger.warn("Failed to broadcast availability update:", error)
+      }
 
       res.json({
         success: true,
@@ -612,18 +970,22 @@ export class DriverController {
       })
 
       // Broadcast location to customers with active bookings
-      const { io } = await import("../server")
-      activeBookings.forEach((booking) => {
-        io.to(`user_${booking.customerId}`).emit("driver_location_update", {
-          bookingId: booking.id,
-          latitude,
-          longitude,
-          heading,
-          speed,
-          zone: detectedZone,
-          timestamp: new Date(),
-        })
-      })
+      try {
+        const { io } = await import("../server")
+        for (const booking of activeBookings) {
+          await io.notifyUser(booking.customerId, "driver_location_update", {
+            bookingId: booking.id,
+            latitude,
+            longitude,
+            heading,
+            speed,
+            zone: detectedZone,
+            timestamp: new Date(),
+          })
+        }
+      } catch (error) {
+        logger.warn("Failed to broadcast location updates:", error)
+      }
 
       res.json({
         success: true,
@@ -781,6 +1143,37 @@ export class DriverController {
 
       const result = await this.driverService.arriveAtPickup(userId, bookingId)
 
+      // Emit WebSocket events
+      try {
+        const { io } = await import("../server")
+
+        // Get role-specific event name
+        const userRole = req.user?.role || "DRIVER"
+        let driverArrivedEvent = "driver_arrived"
+        if (userRole === "TAXI_DRIVER") {
+          driverArrivedEvent = "taxi_driver_arrived"
+        } else if (userRole === "DISPATCHER") {
+          driverArrivedEvent = "dispatch_driver_arrived"
+        }
+
+        // Emit role-specific event to driver
+        await io.notifyUser(userId, driverArrivedEvent, {
+          bookingId: bookingId,
+          message: "You have arrived at the pickup location",
+          timestamp: new Date(),
+        })
+
+        // Emit booking_update to booking room for customer
+        await io.emitToRoom(`booking:${bookingId}`, "booking_update", {
+          bookingId: bookingId,
+          status: "DRIVER_ARRIVED",
+          message: "Driver has arrived at pickup location",
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to emit WebSocket events:", error)
+      }
+
       res.json({
         success: true,
         message: "Arrival confirmed successfully",
@@ -816,6 +1209,37 @@ export class DriverController {
       const bookingId = req.params.bookingId || req.params.id // Support both parameter names
 
       const result = await this.driverService.startTrip(userId, bookingId)
+
+      // Emit WebSocket events
+      try {
+        const { io } = await import("../server")
+
+        // Get role-specific event name
+        const userRole = req.user?.role || "DRIVER"
+        let tripStartedEvent = "trip_started"
+        if (userRole === "TAXI_DRIVER") {
+          tripStartedEvent = "taxi_trip_started"
+        } else if (userRole === "DISPATCHER") {
+          tripStartedEvent = "dispatch_trip_started"
+        }
+
+        // Emit role-specific event to driver
+        await io.notifyUser(userId, tripStartedEvent, {
+          bookingId: bookingId,
+          message: "Trip has started successfully",
+          timestamp: new Date(),
+        })
+
+        // Emit booking_update to booking room for customer
+        await io.emitToRoom(`booking:${bookingId}`, "booking_update", {
+          bookingId: bookingId,
+          status: "IN_PROGRESS",
+          message: "Trip has started",
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to emit WebSocket events:", error)
+      }
 
       res.json({
         success: true,
@@ -860,6 +1284,38 @@ export class DriverController {
         endLatitude,
         endLongitude,
       })
+
+      // Emit WebSocket events
+      try {
+        const { io } = await import("../server")
+
+        // Get role-specific event name
+        const userRole = req.user?.role || "DRIVER"
+        let tripCompletedEvent = "trip_completed"
+        if (userRole === "TAXI_DRIVER") {
+          tripCompletedEvent = "taxi_trip_completed"
+        } else if (userRole === "DISPATCHER") {
+          tripCompletedEvent = "dispatch_trip_completed"
+        }
+
+        // Emit role-specific event to driver
+        await io.notifyUser(userId, tripCompletedEvent, {
+          bookingId: bookingId,
+          earnings: result.providerEarning || 0,
+          message: "Trip completed successfully",
+          timestamp: new Date(),
+        })
+
+        // Emit booking_update to booking room for customer
+        await io.emitToRoom(`booking:${bookingId}`, "booking_update", {
+          bookingId: bookingId,
+          status: "COMPLETED",
+          message: "Trip completed successfully",
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to emit WebSocket events:", error)
+      }
 
       res.json({
         success: true,
@@ -2475,6 +2931,92 @@ export class DriverController {
       // Use the existing acceptBooking method from DriverService
       const result = await this.driverService.acceptBooking(userId, bookingId)
 
+      // Get the booking with driver information for WebSocket events
+      const booking = await prisma.booking.findUnique({
+        where: { id: bookingId },
+        include: {
+          provider: {
+            include: {
+              driverProfile: {
+                include: {
+                  vehicle: true,
+                },
+              },
+            },
+          },
+        },
+      })
+
+      // Emit WebSocket events
+      try {
+        const { io } = await import("../server")
+
+        // Get role-specific event name
+        const userRole = req.user?.role || "DRIVER"
+        let bookingAcceptedEvent = "booking_accepted"
+        if (userRole === "TAXI_DRIVER") {
+          bookingAcceptedEvent = "taxi_booking_accepted"
+        } else if (userRole === "DISPATCHER") {
+          bookingAcceptedEvent = "dispatch_booking_accepted"
+        }
+
+        // Emit role-specific booking accepted event to driver
+        await io.notifyUser(userId, bookingAcceptedEvent, {
+          bookingId: bookingId,
+          customer: {
+            name: "Customer Name", // You can get this from booking.customer
+          },
+          message: "Booking accepted successfully",
+          timestamp: new Date(),
+        })
+
+        // Emit booking_update with DRIVER_ASSIGNED to booking room for customer
+        const updateData: any = {
+          bookingId: bookingId,
+          status: "DRIVER_ASSIGNED",
+          message: "Driver has been assigned to your booking",
+          timestamp: new Date(),
+        }
+
+        if (booking?.provider) {
+          const driverProfile = booking.provider.driverProfile
+          if (driverProfile) {
+            updateData.driver = {
+              id: booking.provider.id,
+              name: `${booking.provider.firstName} ${booking.provider.lastName}`,
+              phone: booking.provider.phone,
+              rating: driverProfile.rating,
+              currentLocation: {
+                latitude: driverProfile.currentLatitude,
+                longitude: driverProfile.currentLongitude,
+              },
+              photoUrl: booking.provider.avatar,
+            }
+            updateData.vehicle = driverProfile.vehicle ? {
+              model: driverProfile.vehicle.model,
+              licensePlate: driverProfile.vehicle.licensePlate,
+            } : null
+            updateData.bookingNumber = booking.bookingNumber
+            updateData.pickupLocation = {
+              address: "Pickup Location",
+              latitude: booking.pickupLatitude,
+              longitude: booking.pickupLongitude,
+            }
+            updateData.dropoffLocation = {
+              address: "Dropoff Location",
+              latitude: booking.dropoffLatitude,
+              longitude: booking.dropoffLongitude,
+            }
+            updateData.estimatedPrice = booking.estimatedPrice
+            updateData.estimatedDuration = booking.estimatedDuration
+          }
+        }
+
+        await io.emitToRoom(`booking:${bookingId}`, "booking_update", updateData)
+      } catch (error) {
+        logger.warn("Failed to emit WebSocket events:", error)
+      }
+
       // Update driver notification status
       await prisma.driverNotification.updateMany({
         where: {
@@ -2560,6 +3102,96 @@ export class DriverController {
       res.status(500).json({
         success: false,
         message: "Failed to reject booking request",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  getBookingUpdates = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      console.log("=== GET BOOKING UPDATES REQUEST ===")
+      console.log("Request user:", req.user)
+      console.log("===================================")
+
+      if (!req.user?.id) {
+        return res.status(401).json({
+          success: false,
+          message: "Authentication required",
+        })
+      }
+
+      const userId = req.user.id
+
+      // Get current active booking
+      const activeBooking = await prisma.booking.findFirst({
+        where: {
+          providerId: userId,
+          status: {
+            in: ["DRIVER_ASSIGNED", "DRIVER_ARRIVED", "IN_PROGRESS"],
+          },
+        },
+        include: {
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              avatar: true,
+            },
+          },
+          serviceType: true,
+          trackingUpdates: {
+            orderBy: { timestamp: "desc" },
+            take: 5,
+          },
+        },
+        orderBy: { acceptedAt: "desc" },
+      })
+
+      // Get pending notifications
+      const pendingNotifications = await prisma.driverNotification.findMany({
+        where: {
+          driverId: userId,
+          status: "SENT",
+          booking: {
+            status: "PENDING",
+          },
+        },
+        include: {
+          booking: {
+            include: {
+              customer: {
+                select: {
+                  firstName: true,
+                  lastName: true,
+                },
+              },
+              serviceType: true,
+            },
+          },
+        },
+        orderBy: { notifiedAt: "desc" },
+        take: 5,
+      })
+
+      res.json({
+        success: true,
+        message: "Booking updates retrieved successfully",
+        data: {
+          activeBooking,
+          pendingRequests: pendingNotifications.map((notification) => ({
+            notificationId: notification.id,
+            booking: notification.booking,
+            timeRemaining: Math.max(0, 60 - Math.floor((Date.now() - notification.notifiedAt.getTime()) / 1000)),
+          })),
+        },
+      })
+    } catch (error) {
+      logger.error("Get booking updates error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve booking updates",
         error: error instanceof Error ? error.message : "Unknown error",
       })
     }

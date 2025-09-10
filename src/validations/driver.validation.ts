@@ -2,21 +2,94 @@ import Joi from "joi"
 
 export const driverValidation = {
   onboard: Joi.object({
+    // Personal Information
+    email: Joi.string().email().required(),
+    phone: Joi.string().required(),
+    firstName: Joi.string().required(),
+    lastName: Joi.string().required(),
+    password: Joi.string().min(6).required(),
+    confirmPassword: Joi.string().required(),
+    gender: Joi.string().valid("MALE", "FEMALE").optional(),
+    dateOfBirth: Joi.date().optional(),
+
+    // Driver License Information
     licenseNumber: Joi.string().required(),
     licenseExpiry: Joi.date().greater("now").required(),
     licenseClass: Joi.string().required(),
+    driverType: Joi.string().valid("REGULAR", "TAXI", "DISPATCH_RIDER").required(),
+
+    // Taxi-specific fields (optional for routing)
+    taxiLicenseNumber: Joi.string().optional(),
+    taxiLicenseExpiry: Joi.date().optional(),
+    taxiPermitNumber: Joi.string().optional(),
+    taxiPermitExpiry: Joi.date().optional(),
+    taxiZone: Joi.string().optional(),
+    meterNumber: Joi.string().optional(),
+
+    // Operating hours for taxi drivers
+    operatingHours: Joi.object({
+      monday: Joi.object({
+        isActive: Joi.boolean().optional(),
+        startTime: Joi.string().optional(),
+        endTime: Joi.string().optional(),
+      }).optional(),
+      tuesday: Joi.object({
+        isActive: Joi.boolean().optional(),
+        startTime: Joi.string().optional(),
+        endTime: Joi.string().optional(),
+      }).optional(),
+      wednesday: Joi.object({
+        isActive: Joi.boolean().optional(),
+        startTime: Joi.string().optional(),
+        endTime: Joi.string().optional(),
+      }).optional(),
+      thursday: Joi.object({
+        isActive: Joi.boolean().optional(),
+        startTime: Joi.string().optional(),
+        endTime: Joi.string().optional(),
+      }).optional(),
+      friday: Joi.object({
+        isActive: Joi.boolean().optional(),
+        startTime: Joi.string().optional(),
+        endTime: Joi.string().optional(),
+      }).optional(),
+      saturday: Joi.object({
+        isActive: Joi.boolean().optional(),
+        startTime: Joi.string().optional(),
+        endTime: Joi.string().optional(),
+      }).optional(),
+      sunday: Joi.object({
+        isActive: Joi.boolean().optional(),
+        startTime: Joi.string().optional(),
+        endTime: Joi.string().optional(),
+      }).optional(),
+    }).optional(),
+
+    // Vehicle Information
     vehicleInfo: Joi.object({
       make: Joi.string().required(),
       model: Joi.string().required(),
-      year: Joi.number()
-        .min(2000)
-        .max(new Date().getFullYear() + 1)
-        .required(),
-      color: Joi.string().required(),
+      year: Joi.string().required(),
       licensePlate: Joi.string().required(),
-      type: Joi.string().valid("CAR", "MOTORCYCLE", "VAN", "TRUCK").required(),
-      category: Joi.string().valid("ECONOMY", "COMFORT", "PREMIUM", "SUV").required(),
-    }).optional(),
+      color: Joi.string().required(),
+      type: Joi.string().valid("SEDAN", "SUV", "HATCHBACK", "MOTORCYCLE", "VAN", "PICKUP", "CAR").required(),
+    }).required(),
+
+    // Location Information
+    currentLatitude: Joi.number().min(-90).max(90).required(),
+    currentLongitude: Joi.number().min(-180).max(180).required(),
+
+    // Service Zones
+    preferredServiceZones: Joi.array().items(Joi.string()).optional(),
+
+    // Preferences
+    acceptsSharedRides: Joi.boolean().default(true),
+    acceptsCash: Joi.boolean().default(true),
+    maxRideDistance: Joi.number().min(1).max(500).optional(),
+    isAvailableForDayBooking: Joi.boolean().default(false),
+    canAcceptInterRegional: Joi.boolean().default(false),
+
+    // Optional fields for existing users
     bankDetails: Joi.object({
       bankName: Joi.string().required(),
       accountNumber: Joi.string().required(),
@@ -27,7 +100,6 @@ export const driverValidation = {
       phone: Joi.string().required(),
       relationship: Joi.string().required(),
     }).optional(),
-    preferredServiceZones: Joi.array().items(Joi.string()).optional(),
   }),
 
   setupDayBooking: Joi.object({
@@ -129,7 +201,7 @@ export const driverValidation = {
       .required(),
     color: Joi.string().required(),
     licensePlate: Joi.string().required(),
-    type: Joi.string().valid("CAR", "MOTORCYCLE", "VAN", "TRUCK").required(),
+    type: Joi.string().valid("SEDAN", "SUV", "HATCHBACK", "MOTORCYCLE", "VAN", "PICKUP", "CAR", "TRUCK").required(),
     category: Joi.string().valid("ECONOMY", "COMFORT", "PREMIUM", "SUV").required(),
     capacity: Joi.number().min(1).max(50).default(4),
     fuelType: Joi.string().valid("GASOLINE", "DIESEL", "ELECTRIC", "HYBRID").default("GASOLINE"),
@@ -148,7 +220,7 @@ export const driverValidation = {
       .max(new Date().getFullYear() + 1)
       .optional(),
     color: Joi.string().optional(),
-    type: Joi.string().valid("CAR", "MOTORCYCLE", "VAN", "TRUCK").optional(),
+    type: Joi.string().valid("SEDAN", "SUV", "HATCHBACK", "MOTORCYCLE", "VAN", "PICKUP", "CAR", "TRUCK").optional(),
     category: Joi.string().valid("ECONOMY", "COMFORT", "PREMIUM", "SUV").optional(),
     capacity: Joi.number().min(1).max(50).optional(),
     fuelType: Joi.string().valid("GASOLINE", "DIESEL", "ELECTRIC", "HYBRID").optional(),

@@ -97,4 +97,44 @@ router.put(
   emergencyController.verifyEmergencyResponder,
 )
 
+// Emergency contacts routes
+router.post(
+  "/contacts",
+  authMiddleware,
+  validateRequest(emergencyValidation.addEmergencyContact),
+  emergencyController.addEmergencyContact,
+)
+
+router.get("/contacts", authMiddleware, emergencyController.getEmergencyContacts)
+
+router.delete(
+  "/contacts/:contactId",
+  authMiddleware,
+  emergencyController.removeEmergencyContact,
+)
+
+// Location sharing routes
+router.post(
+  "/location/share",
+  authMiddleware,
+  validateRequest(emergencyValidation.shareLocation),
+  emergencyController.shareLocation,
+)
+
+router.get("/location/history", authMiddleware, emergencyController.getLocationSharingHistory)
+
+router.post(
+  "/location/stop",
+  authMiddleware,
+  validateRequest(emergencyValidation.stopLocationSharing),
+  emergencyController.stopLocationSharing,
+)
+
+router.post(
+  "/location/track",
+  authMiddleware,
+  validateRequest(emergencyValidation.trackUserLocation),
+  emergencyController.trackUserLocation,
+)
+
 export default router

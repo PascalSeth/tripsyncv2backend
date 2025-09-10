@@ -23,6 +23,19 @@ export const reviewValidation = {
     }),
   }),
 
+  submitDriverRating: Joi.object({
+    body: Joi.object({
+      driverId: Joi.string().required(),
+      bookingId: Joi.string().required(),
+      rating: Joi.number().min(1).max(5).required(),
+      comment: Joi.string().optional(),
+      serviceRating: Joi.number().min(1).max(5).optional(),
+      timelinessRating: Joi.number().min(1).max(5).optional(),
+      cleanlinessRating: Joi.number().min(1).max(5).optional(),
+      communicationRating: Joi.number().min(1).max(5).optional(),
+    }),
+  }),
+
   updateReview: Joi.object({
     body: Joi.object({
       rating: Joi.number().min(1).max(5).optional(),

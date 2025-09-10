@@ -13,7 +13,6 @@ export const placeValidation = {
     openingHours: Joi.string().max(500).optional(),
     priceLevel: Joi.string().valid("BUDGET", "MODERATE", "EXPENSIVE", "LUXURY").optional(),
     tags: Joi.string().max(200).optional(),
-    imageUrl: Joi.string().uri().optional(),
   }),
 
   updatePlace: Joi.object({

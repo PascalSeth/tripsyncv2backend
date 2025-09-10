@@ -1,0 +1,725 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.StoreService = void 0;
+const database_1 = __importDefault(require("../config/database"));
+const location_service_1 = require("./location.service");
+const logger_1 = __importDefault(require("../utils/logger"));
+class StoreService {
+    constructor() {
+        this.locationService = new location_service_1.LocationService();
+    }
+    async createStore(ownerId, storeData) {
+        try {
+            // Create location first
+            const location = await database_1.default.location.create({
+                data: {
+                    latitude: storeData.latitude,
+                    longitude: storeData.longitude,
+                    address: storeData.address,
+                    city: storeData.city || "Unknown",
+                    state: storeData.state,
+                    country: storeData.country || "Nigeria",
+                    postalCode: storeData.postalCode,
+                },
+            });
+            // Create store
+            const store = await database_1.default.store.create({
+                data: {
+                    name: storeData.name,
+                    type: storeData.type,
+                    locationId: location.id,
+                    ownerId,
+                    contactPhone: storeData.contactPhone,
+                    contactEmail: storeData.contactEmail,
+                    operatingHours: storeData.operatingHours || "9:00 AM - 9:00 PM",
+                    description: storeData.description,
+                    isActive: true,
+                },
+                include: {
+                    location: true,
+                    owner: {
+                        include: {
+                            user: {
+                                select: {
+                                    firstName: true,
+                                    lastName: true,
+                                    email: true,
+                                    phone: true,
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+            // Create default business hours if provided
+            if (storeData.businessHours) {
+                await this.createBusinessHours(store.id, storeData.businessHours);
+            }
+            return store;
+        }
+        catch (error) {
+            logger_1.default.error("Create store error:", error);
+            throw error;
+        }
+    }
+    async getStores(params) {
+        try {
+            const { page, limit, search, type, categoryId, // Updated parameter name
+            subcategoryId, latitude, longitude, radius = 10000, isActive = true, } = params;
+            const skip = (page - 1) * limit;
+            const where = { isActive };
+            if (search) {
+                where.OR = [
+                    { name: { contains: search, mode: "insensitive" } },
+                    { description: { contains: search, mode: "insensitive" } },
+                ];
+            }
+            if (type) {
+                where.type = type;
+            }
+            if (categoryId || subcategoryId) {
+                where.products = {
+                    some: {
+                        ...(categoryId && { categoryId }),
+                        ...(subcategoryId && { subcategoryId }),
+                    },
+                };
+            }
+            let stores = await database_1.default.store.findMany({
+                where,
+                include: {
+                    location: true,
+                    owner: {
+                        include: {
+                            user: {
+                                select: {
+                                    firstName: true,
+                                    lastName: true,
+                                },
+                            },
+                        },
+                    },
+                    products: {
+                        take: 5, // Get first 5 products for preview
+                        include: {
+                            category: true, // Include category model instead of subcategory.category
+                            subcategory: {
+                                include: {
+                                    category: true,
+                                },
+                            },
+                        },
+                    },
+                    _count: {
+                        select: {
+                            products: true,
+                        },
+                    },
+                },
+                skip,
+                take: limit,
+                orderBy: { name: "asc" },
+            });
+            // Filter by location if coordinates provided
+            if (latitude && longitude) {
+                stores = stores.filter((store) => {
+                    if (!store.location)
+                        return false;
+                    const distance = this.locationService.calculateDistance(latitude, longitude, store.location.latitude, store.location.longitude);
+                    return distance <= radius;
+                });
+            }
+            const total = await database_1.default.store.count({ where });
+            return {
+                stores,
+                pagination: {
+                    page,
+                    limit,
+                    total: latitude && longitude ? stores.length : total,
+                    totalPages: Math.ceil((latitude && longitude ? stores.length : total) / limit),
+                },
+            };
+        }
+        catch (error) {
+            logger_1.default.error("Get stores error:", error);
+            throw error;
+        }
+    }
+    async getStoreById(storeId) {
+        try {
+            const store = await database_1.default.store.findUnique({
+                where: { id: storeId },
+                include: {
+                    location: true,
+                    owner: {
+                        include: {
+                            user: {
+                                select: {
+                                    firstName: true,
+                                    lastName: true,
+                                    email: true,
+                                    phone: true,
+                                },
+                            },
+                        },
+                    },
+                    products: {
+                        where: { inStock: true },
+                        include: {
+                            subcategory: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    category: true,
+                                },
+                            },
+                        },
+                        orderBy: { name: "asc" },
+                    },
+                    businessHours: {
+                        orderBy: { dayOfWeek: "asc" },
+                    },
+                    _count: {
+                        select: {
+                            products: true,
+                        },
+                    },
+                },
+            });
+            if (!store) {
+                throw new Error("Store not found");
+            }
+            return store;
+        }
+        catch (error) {
+            logger_1.default.error("Get store by ID error:", error);
+            throw error;
+        }
+    }
+    async updateStore(storeId, updateData, userId) {
+        try {
+            // Check ownership
+            const store = await database_1.default.store.findUnique({
+                where: { id: storeId },
+                include: { owner: true },
+            });
+            if (!store) {
+                throw new Error("Store not found");
+            }
+            if (store.owner.userId !== userId) {
+                // Check if user is admin
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                });
+                if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+                    throw new Error("Unauthorized to update this store");
+                }
+            }
+            // Update location if provided
+            if (updateData.latitude || updateData.longitude || updateData.address) {
+                await database_1.default.location.update({
+                    where: { id: store.locationId },
+                    data: {
+                        ...(updateData.latitude && { latitude: updateData.latitude }),
+                        ...(updateData.longitude && { longitude: updateData.longitude }),
+                        ...(updateData.address && { address: updateData.address }),
+                        ...(updateData.city && { city: updateData.city }),
+                        ...(updateData.state && { state: updateData.state }),
+                        ...(updateData.postalCode && { postalCode: updateData.postalCode }),
+                    },
+                });
+            }
+            // Update store
+            const updatedStore = await database_1.default.store.update({
+                where: { id: storeId },
+                data: {
+                    ...(updateData.name && { name: updateData.name }),
+                    ...(updateData.type && { type: updateData.type }),
+                    ...(updateData.contactPhone && { contactPhone: updateData.contactPhone }),
+                    ...(updateData.contactEmail && { contactEmail: updateData.contactEmail }),
+                    ...(updateData.operatingHours && { operatingHours: updateData.operatingHours }),
+                    ...(updateData.description && { description: updateData.description }),
+                    ...(updateData.isActive !== undefined && { isActive: updateData.isActive }),
+                },
+                include: {
+                    location: true,
+                    owner: {
+                        include: {
+                            user: {
+                                select: {
+                                    firstName: true,
+                                    lastName: true,
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+            return updatedStore;
+        }
+        catch (error) {
+            logger_1.default.error("Update store error:", error);
+            throw error;
+        }
+    }
+    async deleteStore(storeId, userId) {
+        try {
+            // Check ownership
+            const store = await database_1.default.store.findUnique({
+                where: { id: storeId },
+                include: { owner: true },
+            });
+            if (!store) {
+                throw new Error("Store not found");
+            }
+            if (store.owner.userId !== userId) {
+                // Check if user is admin
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                });
+                if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+                    throw new Error("Unauthorized to delete this store");
+                }
+            }
+            // Soft delete
+            await database_1.default.store.update({
+                where: { id: storeId },
+                data: { isActive: false },
+            });
+            return { success: true };
+        }
+        catch (error) {
+            logger_1.default.error("Delete store error:", error);
+            throw error;
+        }
+    }
+    async addProduct(storeId, productData, userId) {
+        try {
+            // Check store ownership
+            const store = await database_1.default.store.findUnique({
+                where: { id: storeId },
+                include: { owner: true },
+            });
+            if (!store) {
+                throw new Error("Store not found");
+            }
+            if (store.owner.userId !== userId) {
+                throw new Error("Unauthorized to add products to this store");
+            }
+            if (productData.categoryId) {
+                const category = await database_1.default.category.findUnique({
+                    where: { id: productData.categoryId },
+                });
+                if (!category) {
+                    throw new Error("Invalid category ID. Category does not exist.");
+                }
+            }
+            // Validate subcategory if provided
+            if (productData.subcategoryId) {
+                const subcategory = await database_1.default.subcategory.findUnique({
+                    where: { id: productData.subcategoryId },
+                    include: { category: true },
+                });
+                if (!subcategory) {
+                    throw new Error("Subcategory not found");
+                }
+                // Ensure subcategory matches the product category
+                if (productData.categoryId && subcategory.categoryId !== productData.categoryId) {
+                    throw new Error("Subcategory does not match the product category");
+                }
+            }
+            const product = await database_1.default.product.create({
+                data: {
+                    storeId,
+                    name: productData.name,
+                    description: productData.description,
+                    price: productData.price,
+                    categoryId: productData.categoryId,
+                    subcategoryId: productData.subcategoryId,
+                    image: productData.image,
+                    inStock: productData.inStock !== false,
+                    stockQuantity: productData.stockQuantity || 0,
+                },
+                include: {
+                    category: true,
+                    subcategory: {
+                        include: {
+                            category: true,
+                        },
+                    },
+                },
+            });
+            return product;
+        }
+        catch (error) {
+            logger_1.default.error("Add product error:", error);
+            throw error;
+        }
+    }
+    async getProducts(storeId, filters) {
+        try {
+            const { page, limit, search, categoryId, subcategoryId, inStock } = filters; // Updated parameter name
+            const skip = (page - 1) * limit;
+            const where = { storeId };
+            if (search) {
+                where.OR = [
+                    { name: { contains: search, mode: "insensitive" } },
+                    { description: { contains: search, mode: "insensitive" } },
+                ];
+            }
+            if (categoryId) {
+                // Updated to use categoryId
+                where.categoryId = categoryId;
+            }
+            if (subcategoryId) {
+                where.subcategoryId = subcategoryId;
+            }
+            if (inStock !== undefined) {
+                where.inStock = inStock;
+            }
+            const [products, total] = await Promise.all([
+                database_1.default.product.findMany({
+                    where,
+                    include: {
+                        category: true, // Include category model
+                        subcategory: {
+                            include: {
+                                category: true,
+                            },
+                        },
+                    },
+                    orderBy: { name: "asc" },
+                    skip,
+                    take: limit,
+                }),
+                database_1.default.product.count({ where }),
+            ]);
+            return {
+                products,
+                pagination: {
+                    page,
+                    limit,
+                    total,
+                    totalPages: Math.ceil(total / limit),
+                },
+            };
+        }
+        catch (error) {
+            logger_1.default.error("Get products error:", error);
+            throw error;
+        }
+    }
+    async updateProduct(productId, updateData, userId) {
+        try {
+            // Check ownership through store
+            const product = await database_1.default.product.findUnique({
+                where: { id: productId },
+                include: {
+                    store: {
+                        include: { owner: true },
+                    },
+                },
+            });
+            if (!product) {
+                throw new Error("Product not found");
+            }
+            if (product.store.owner.userId !== userId) {
+                throw new Error("Unauthorized to update this product");
+            }
+            if (updateData.categoryId) {
+                const category = await database_1.default.category.findUnique({
+                    where: { id: updateData.categoryId },
+                });
+                if (!category) {
+                    throw new Error("Invalid category ID. Category does not exist.");
+                }
+            }
+            // Validate subcategory if provided
+            if (updateData.subcategoryId) {
+                const subcategory = await database_1.default.subcategory.findUnique({
+                    where: { id: updateData.subcategoryId },
+                    include: { category: true },
+                });
+                if (!subcategory) {
+                    throw new Error("Subcategory not found");
+                }
+                // Ensure subcategory matches the product category
+                const categoryToCheck = updateData.categoryId || product.categoryId;
+                if (categoryToCheck && subcategory.categoryId !== categoryToCheck) {
+                    throw new Error("Subcategory does not match the product category");
+                }
+            }
+            const updatedProduct = await database_1.default.product.update({
+                where: { id: productId },
+                data: updateData,
+                include: {
+                    category: true, // Include category model
+                    subcategory: {
+                        include: {
+                            category: true,
+                        },
+                    },
+                },
+            });
+            return updatedProduct;
+        }
+        catch (error) {
+            logger_1.default.error("Update product error:", error);
+            throw error;
+        }
+    }
+    async deleteProduct(productId, userId) {
+        try {
+            // Check ownership through store
+            const product = await database_1.default.product.findUnique({
+                where: { id: productId },
+                include: {
+                    store: {
+                        include: { owner: true },
+                    },
+                },
+            });
+            if (!product) {
+                throw new Error("Product not found");
+            }
+            if (product.store.owner.userId !== userId) {
+                throw new Error("Unauthorized to delete this product");
+            }
+            await database_1.default.product.delete({
+                where: { id: productId },
+            });
+            return { success: true };
+        }
+        catch (error) {
+            logger_1.default.error("Delete product error:", error);
+            throw error;
+        }
+    }
+    async updateBusinessHours(storeId, businessHours, userId) {
+        try {
+            // Check store ownership
+            const store = await database_1.default.store.findUnique({
+                where: { id: storeId },
+                include: { owner: true },
+            });
+            if (!store) {
+                throw new Error("Store not found");
+            }
+            if (store.owner.userId !== userId) {
+                throw new Error("Unauthorized to update business hours for this store");
+            }
+            // Delete existing business hours
+            await database_1.default.businessHours.deleteMany({
+                where: { storeId },
+            });
+            // Create new business hours
+            const createdHours = await Promise.all(businessHours.map((hours) => database_1.default.businessHours.create({
+                data: {
+                    storeId,
+                    dayOfWeek: hours.dayOfWeek,
+                    openTime: hours.openTime,
+                    closeTime: hours.closeTime,
+                    isClosed: hours.isClosed || false,
+                },
+            })));
+            return createdHours;
+        }
+        catch (error) {
+            logger_1.default.error("Update business hours error:", error);
+            throw error;
+        }
+    }
+    async getStoreAnalytics(storeId, params) {
+        try {
+            // Check store ownership
+            const store = await database_1.default.store.findUnique({
+                where: { id: storeId },
+                include: { owner: true },
+            });
+            if (!store) {
+                throw new Error("Store not found");
+            }
+            if (store.owner.userId !== params.userId) {
+                throw new Error("Unauthorized to view analytics for this store");
+            }
+            const dateFilter = {};
+            if (params.startDate)
+                dateFilter.gte = new Date(params.startDate);
+            if (params.endDate)
+                dateFilter.lte = new Date(params.endDate);
+            // Get orders from bookings
+            const orders = await database_1.default.booking.findMany({
+                where: {
+                    serviceData: {
+                        path: ["storeId"],
+                        equals: storeId,
+                    },
+                    ...(Object.keys(dateFilter).length > 0 && { createdAt: dateFilter }),
+                },
+                include: {
+                    orderItems: true,
+                },
+            });
+            // Calculate analytics
+            const totalOrders = orders.length;
+            const totalRevenue = orders.reduce((sum, order) => sum + (order.finalPrice || 0), 0);
+            const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+            // Product analytics
+            const productCount = await database_1.default.product.count({
+                where: { storeId },
+            });
+            const lowStockProducts = await database_1.default.product.count({
+                where: {
+                    storeId,
+                    stockQuantity: { lt: 10 },
+                    inStock: true,
+                },
+            });
+            // Popular products
+            const orderItems = orders.flatMap((order) => order.orderItems);
+            const productSales = {};
+            orderItems.forEach((item) => {
+                productSales[item.name] = (productSales[item.name] || 0) + item.quantity;
+            });
+            const popularProducts = Object.entries(productSales)
+                .sort(([, a], [, b]) => b - a)
+                .slice(0, 5)
+                .map(([name, quantity]) => ({ name, quantity }));
+            // Category breakdown
+            const categoryBreakdown = await database_1.default.product.groupBy({
+                by: ["categoryId"],
+                where: { storeId },
+                _count: {
+                    categoryId: true,
+                },
+            });
+            return {
+                totalOrders,
+                totalRevenue,
+                averageOrderValue,
+                productCount,
+                lowStockProducts,
+                popularProducts,
+                categoryBreakdown,
+                orders: orders.slice(0, 10), // Recent orders
+            };
+        }
+        catch (error) {
+            logger_1.default.error("Get store analytics error:", error);
+            throw error;
+        }
+    }
+    async updateInventory(productId, data) {
+        try {
+            // Check ownership through store
+            const product = await database_1.default.product.findUnique({
+                where: { id: productId },
+                include: {
+                    store: {
+                        include: { owner: true },
+                    },
+                },
+            });
+            if (!product) {
+                throw new Error("Product not found");
+            }
+            if (product.store.owner.userId !== data.userId) {
+                throw new Error("Unauthorized to update inventory for this product");
+            }
+            let newStockQuantity;
+            switch (data.operation) {
+                case "set":
+                    newStockQuantity = data.stockQuantity;
+                    break;
+                case "add":
+                    newStockQuantity = product.stockQuantity + data.stockQuantity;
+                    break;
+                case "subtract":
+                    newStockQuantity = Math.max(0, product.stockQuantity - data.stockQuantity);
+                    break;
+                default:
+                    throw new Error("Invalid operation");
+            }
+            const updatedProduct = await database_1.default.product.update({
+                where: { id: productId },
+                data: {
+                    stockQuantity: newStockQuantity,
+                    inStock: newStockQuantity > 0,
+                },
+                include: {
+                    subcategory: {
+                        select: {
+                            id: true,
+                            name: true,
+                            category: true,
+                        },
+                    },
+                },
+            });
+            return updatedProduct;
+        }
+        catch (error) {
+            logger_1.default.error("Update inventory error:", error);
+            throw error;
+        }
+    }
+    async getLowStockProducts(storeId, params) {
+        try {
+            // Check store ownership
+            const store = await database_1.default.store.findUnique({
+                where: { id: storeId },
+                include: { owner: true },
+            });
+            if (!store) {
+                throw new Error("Store not found");
+            }
+            if (store.owner.userId !== params.userId) {
+                throw new Error("Unauthorized to view products for this store");
+            }
+            const products = await database_1.default.product.findMany({
+                where: {
+                    storeId,
+                    stockQuantity: { lt: params.threshold },
+                    inStock: true,
+                },
+                include: {
+                    subcategory: {
+                        select: {
+                            id: true,
+                            name: true,
+                            category: true,
+                        },
+                    },
+                },
+                orderBy: { stockQuantity: "asc" },
+            });
+            return products;
+        }
+        catch (error) {
+            logger_1.default.error("Get low stock products error:", error);
+            throw error;
+        }
+    }
+    async createBusinessHours(storeId, businessHours) {
+        try {
+            const createdHours = await Promise.all(businessHours.map((hours) => database_1.default.businessHours.create({
+                data: {
+                    storeId,
+                    dayOfWeek: hours.dayOfWeek,
+                    openTime: hours.openTime,
+                    closeTime: hours.closeTime,
+                    isClosed: hours.isClosed || false,
+                },
+            })));
+            return createdHours;
+        }
+        catch (error) {
+            logger_1.default.error("Create business hours error:", error);
+            throw error;
+        }
+    }
+}
+exports.StoreService = StoreService;

@@ -375,6 +375,7 @@ export class DispatchRiderService {
               include: {
                 customer: {
                   select: {
+                    id: true,
                     firstName: true,
                     lastName: true,
                     phone: true,
@@ -383,11 +384,27 @@ export class DispatchRiderService {
                 },
                 store: {
                   select: {
+                    id: true,
                     name: true,
                     contactPhone: true,
                   },
+                  include: {
+                    location: {
+                      select: {
+                        address: true,
+                      },
+                    },
+                  },
                 },
-                orderItems: true,
+                orderItems: {
+                  select: {
+                    id: true,
+                    name: true,
+                    unitPrice: true,
+                    quantity: true,
+                    description: true,
+                  },
+                },
               },
             },
             pickupLocation: true,
@@ -494,6 +511,7 @@ export class DispatchRiderService {
             include: {
               user: {
                 select: {
+                  id: true,
                   firstName: true,
                   lastName: true,
                   phone: true,
@@ -554,6 +572,76 @@ export class DispatchRiderService {
         },
         priority: PriorityLevel.STANDARD,
       })
+
+      try {
+        const { io } = await import("../server")
+
+        // Notify store owner via WebSocket
+        if (delivery.order.store?.ownerId) {
+          await io.notifyUser(delivery.order.store.ownerId, "delivery_update", {
+            deliveryId: delivery.id,
+            orderId: delivery.orderId,
+            status: "ASSIGNED",
+            dispatchRider: {
+              id: updatedDelivery.dispatchRider?.user.id,
+              name: `${updatedDelivery.dispatchRider?.user.firstName} ${updatedDelivery.dispatchRider?.user.lastName}`,
+              phone: updatedDelivery.dispatchRider?.user.phone,
+              avatar: updatedDelivery.dispatchRider?.user.avatar,
+              rating: deliveryProfile.rating,
+            },
+            vehicle: deliveryProfile.vehicle,
+            eta,
+            timestamp: new Date(),
+          })
+        }
+
+        // Notify customer via WebSocket
+        await io.notifyUser(delivery.order.customerId, "delivery_update", {
+          deliveryId: delivery.id,
+          orderId: delivery.orderId,
+          status: "ASSIGNED",
+          dispatchRider: {
+            id: updatedDelivery.dispatchRider?.user.id,
+            name: `${updatedDelivery.dispatchRider?.user.firstName} ${updatedDelivery.dispatchRider?.user.lastName}`,
+            phone: updatedDelivery.dispatchRider?.user.phone,
+            avatar: updatedDelivery.dispatchRider?.user.avatar,
+            rating: deliveryProfile.rating,
+          },
+          vehicle: deliveryProfile.vehicle,
+          eta,
+          timestamp: new Date(),
+        })
+
+        // Notify dispatch rider via WebSocket
+        await io.notifyUser(dispatchRiderId, "delivery_accepted", {
+          deliveryId: delivery.id,
+          orderId: delivery.orderId,
+          customer: {
+            name: `${delivery.order.customer?.firstName} ${delivery.order.customer?.lastName}`,
+            phone: delivery.order.customer?.phone,
+          },
+          store: {
+            name: delivery.order.store?.name,
+            phone: delivery.order.store?.contactPhone,
+          },
+          pickup: {
+            latitude: delivery.pickupLocation.latitude,
+            longitude: delivery.pickupLocation.longitude,
+            address: delivery.pickupLocation.address,
+          },
+          dropoff: {
+            latitude: delivery.deliveryLocation.latitude,
+            longitude: delivery.deliveryLocation.longitude,
+            address: delivery.deliveryLocation.address,
+          },
+          estimatedEarning: delivery.deliveryFee,
+          timestamp: new Date(),
+        })
+
+        console.log(`📡 Real-time delivery updates sent to customer, store, and dispatch rider`)
+      } catch (socketError) {
+        console.error(`❌ WebSocket notification failed:`, socketError)
+      }
 
       // Start tracking
       await this.startDeliveryTracking(deliveryId, dispatchRiderId)
@@ -1288,11 +1376,11 @@ export class DispatchRiderService {
         throw new Error("Order not found")
       }
 
-      if (order.store.owner.userId !== storeOwnerId) {
+      if (!order.store || order.store.owner.userId !== storeOwnerId) {
         throw new Error("Unauthorized to manage this order")
       }
 
-      if (order.status !== "CONFIRMED") {
+      if (order.status !== "ORDER_CONFIRMED") {
         throw new Error("Order must be confirmed before marking as ready")
       }
 
@@ -1310,7 +1398,7 @@ export class DispatchRiderService {
       const delivery = await prisma.delivery.create({
         data: {
           orderId,
-          pickupLocationId: order.store.locationId,
+          pickupLocationId: order.store?.locationId,
           deliveryLocationId: order.deliveryLocationId!,
           deliveryFee: orderData.deliveryFee || 0,
           estimatedPickupTime: orderData.estimatedPickupTime ? new Date(orderData.estimatedPickupTime) : new Date(),
@@ -1329,11 +1417,11 @@ export class DispatchRiderService {
       await this.notificationService.notifyCustomer(order.customerId, {
         type: NotificationType.ORDER_READY,
         title: "Order Ready for Pickup",
-        body: `Your order from ${order.store.name} is ready and we're finding a dispatch rider to deliver it to you.`,
+        body: `Your order from ${order.store?.name || 'Store'} is ready and we're finding a dispatch rider to deliver it to you.`,
         data: {
           orderId,
           deliveryId: delivery.id,
-          storeName: order.store.name,
+          storeName: order.store?.name || 'Store',
         },
         priority: PriorityLevel.STANDARD,
       })
@@ -1384,7 +1472,15 @@ export class DispatchRiderService {
                 avatar: true,
               },
             },
-            orderItems: true,
+            orderItems: {
+              select: {
+                id: true,
+                name: true,
+                quantity: true,
+                unitPrice: true,
+                description: true,
+              },
+            },
             deliveryLocation: true,
             delivery: {
               include: {
@@ -1486,6 +1582,14 @@ export class DispatchRiderService {
           id: deliveryId,
           dispatchRiderId,
         },
+        include: {
+          order: {
+            include: {
+              customer: true,
+              store: true,
+            },
+          },
+        },
       })
 
       if (!delivery) {
@@ -1513,6 +1617,38 @@ export class DispatchRiderService {
           heading: trackingData.heading,
         },
       })
+
+      try {
+        const { io } = await import("../server")
+
+        // Notify customer with location update
+        await io.notifyUser(delivery.order.customerId, "dispatch_rider_location_update", {
+          deliveryId: delivery.id,
+          orderId: delivery.orderId,
+          latitude: trackingData.latitude,
+          longitude: trackingData.longitude,
+          heading: trackingData.heading,
+          status: trackingData.status || delivery.status,
+          message: trackingData.message || "Location update",
+          timestamp: new Date(),
+        })
+
+        // Notify store owner with location update
+        if (delivery.order.store?.ownerId) {
+          await io.notifyUser(delivery.order.store.ownerId, "dispatch_rider_location_update", {
+            deliveryId: delivery.id,
+            orderId: delivery.orderId,
+            latitude: trackingData.latitude,
+            longitude: trackingData.longitude,
+            heading: trackingData.heading,
+            status: trackingData.status || delivery.status,
+            message: trackingData.message || "Location update",
+            timestamp: new Date(),
+          })
+        }
+      } catch (socketError) {
+        logger.warn("Failed to broadcast location updates:", socketError)
+      }
     } catch (error) {
       logger.error("Update delivery tracking error:", error)
       throw error
@@ -1546,6 +1682,10 @@ export class DispatchRiderService {
     } catch (error) {
       logger.error("Start delivery tracking error:", error)
     }
+  }
+
+  async notifyNearbyDispatchRiders(delivery: any) {
+    return this.findAndNotifyDispatchRiders(delivery)
   }
 
   private async findAndNotifyDispatchRiders(delivery: any) {
@@ -1625,5 +1765,170 @@ export class DispatchRiderService {
     const day = d.getDay()
     const diff = d.getDate() - day
     return new Date(d.setDate(diff))
+  }
+
+  async getPendingDeliveryRequests(dispatchRiderId: string) {
+    try {
+      const deliveryProfile = await prisma.deliveryProfile.findUnique({
+        where: { userId: dispatchRiderId },
+      })
+
+      if (!deliveryProfile || !deliveryProfile.isVerified || !deliveryProfile.isAvailable) {
+        return []
+      }
+
+      const pendingRequests = await prisma.delivery.findMany({
+        where: {
+          status: "PENDING",
+          dispatchRiderId: null,
+        },
+        include: {
+          order: {
+            include: {
+              customer: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  phone: true,
+                  avatar: true,
+                },
+              },
+              store: {
+                select: {
+                  id: true,
+                  name: true,
+                  contactPhone: true,
+                  location: {
+                    select: {
+                      address: true,
+                      latitude: true,
+                      longitude: true,
+                    },
+                  },
+                },
+              },
+              orderItems: {
+                select: {
+                  id: true,
+                  name: true,
+                  unitPrice: true,
+                  quantity: true,
+                  description: true,
+                },
+              },
+            },
+          },
+          pickupLocation: true,
+          deliveryLocation: true,
+        },
+        orderBy: { createdAt: "desc" },
+        take: 10,
+      })
+
+      const filteredRequests = pendingRequests.filter((request) => {
+        const distance = this.locationService.calculateDistance(
+          deliveryProfile.currentLatitude!,
+          deliveryProfile.currentLongitude!,
+          request.pickupLocation.latitude,
+          request.pickupLocation.longitude,
+        )
+        return distance <= (deliveryProfile.maxDeliveryDistance || 50000)
+      })
+
+      return filteredRequests
+    } catch (error) {
+      logger.error("Get pending delivery requests error:", error)
+      throw error
+    }
+  }
+
+  async getActiveDelivery(dispatchRiderId: string) {
+    try {
+      const activeDelivery = await prisma.delivery.findFirst({
+        where: {
+          dispatchRiderId,
+          status: {
+            in: ["ASSIGNED", "PICKUP_IN_PROGRESS", "PICKED_UP", "IN_TRANSIT"],
+          },
+        },
+        include: {
+          order: {
+            include: {
+              customer: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  phone: true,
+                  avatar: true,
+                },
+              },
+              store: {
+                select: {
+                  id: true,
+                  name: true,
+                  contactPhone: true,
+                  // address: true,
+                },
+              },
+              orderItems: {
+                select: {
+                  id: true,
+                  name: true,
+                  unitPrice: true,
+                  quantity: true,
+                  description: true,
+                },
+              },
+            },
+          },
+          pickupLocation: true,
+          deliveryLocation: true,
+          // tracking: {
+          //   orderBy: { timestamp: "desc" },
+          //   take: 1,
+          // },
+        },
+      })
+
+      return activeDelivery
+    } catch (error) {
+      logger.error("Get active delivery error:", error)
+      throw error
+    }
+  }
+
+  async getActiveDeliveries(dispatchRiderId: string) {
+    try {
+      const activeDeliveries = await prisma.delivery.findMany({
+        where: {
+          dispatchRiderId,
+          status: {
+            in: ["ASSIGNED", "PICKUP_IN_PROGRESS", "PICKED_UP", "IN_TRANSIT"],
+          },
+        },
+        select: {
+          id: true,
+          orderId: true,
+          status: true,
+          order: {
+            select: {
+              customerId: true,
+            },
+          },
+        },
+      })
+
+      return activeDeliveries.map((delivery) => ({
+        id: delivery.id,
+        orderId: delivery.orderId,
+        customerId: delivery.order.customerId,
+        status: delivery.status,
+      }))
+    } catch (error) {
+      logger.error("Get active deliveries error:", error)
+      throw error
+    }
   }
 }

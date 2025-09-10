@@ -9,10 +9,11 @@ const router = Router()
 const driverController = new DriverController()
 
 // Driver onboarding (no auth required for new drivers)
-router.post("/onboard", driverController.onboardDriver)
+router.post("/onboard", validateRequest(driverValidation.onboard), driverController.onboardDriver)
 
 // All other routes require authentication
 router.use(authenticateToken)
+router.get("/booking-updates", driverController.getBookingUpdates);
 
 // Driver profile management
 router.put("/profile", validateRequest(driverValidation.updateProfile), driverController.updateProfile)

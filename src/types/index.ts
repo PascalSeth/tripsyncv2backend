@@ -1,11 +1,21 @@
 import type { Request } from "express"
-import type { UserRole, Permission } from "@prisma/client"
+import type { UserRole } from "@prisma/client"
+
+/**
+ * Represents a user's role in the system.
+ * Extend this union type as more roles are introduced.
+ */
+
+// Define Permission type as a string for now, assuming it's a simple string array from JWT.
+// If you have specific, known permissions, you should define them as a union of literal strings:
+// export type Permission = "admin:full" | "user:read" | "booking:create" | "driver:update_status";
+export type Permission = string
 
 export interface AuthenticatedRequest extends Request {
   user?: {
     id: string
-    email: string // Changed to non-optional as per schema update
-    phone: string
+    email: string
+    phone: string | null // Changed to allow null
     role: UserRole
     permissions: Permission[]
     isVerified: boolean
@@ -53,12 +63,27 @@ export interface ServiceEstimate {
     surgeAmount: number
     serviceFee: number
   }
+  stabilityMetrics?: {
+    // Made optional as it's not always present in base ServiceEstimate
+    isStable: boolean
+    expectedRange: { min: number; max: number }
+    supplyCount?: number
+    providerCount?: number
+    actualHourlyRate?: number
+  }
+}
+
+// NEW: Extended interface for ride estimates
+export interface RideServiceEstimate extends ServiceEstimate {
+  isFirstSharedRideBooking?: boolean
+  totalSharedRidePriceForGroup?: number
 }
 
 export interface PaystackResponse {
   status: boolean
   message: string
   data?: any
+  [key: string]: any
 }
 
 export interface UploadedFile {
@@ -111,25 +136,17 @@ export interface AnonymousUserData {
   sessionId?: string
 }
 
+/**
+ * Represents the decoded payload from a JWT, containing essential user information.
+ */
 export interface UserPayload {
   id: string
-  email: string // Changed to non-optional
-  phone: string
+  email: string
+  phone: string | null
   role: UserRole
-  permissions: Permission[]
   isVerified: boolean
   isActive: boolean
-}
-
-export interface AuthenticatedRequest extends Request {
-  user?: UserPayload
-}
-
-export interface PaystackResponse {
-  status: boolean
-  message: string
-  data?: any
-  [key: string]: any
+  permissions: Permission[]
 }
 
 export interface NotificationData {
@@ -138,4 +155,15 @@ export interface NotificationData {
   body: string
   data?: any
   priority: "LOW" | "STANDARD" | "HIGH" | "CRITICAL"
+}
+
+// NEW: Interface for available driver locations broadcast from backend
+export interface AvailableDriverLocation {
+  id: string;
+  latitude: number;
+  longitude: number;
+  name?: string;
+  vehicleModel?: string;
+  licensePlate?: string;
+  heading?: number; // If backend sends this
 }

@@ -1,7 +1,7 @@
 import prisma from "../config/database"
 import logger from "../utils/logger"
 import { EmailService } from "./email.service"
-import { NotificationType, PriorityLevel } from "@prisma/client" // Import NotificationType and PriorityLevel
+import { NotificationType, PriorityLevel } from "@prisma/client"
 
 export class NotificationService {
   private emailService: EmailService
@@ -296,8 +296,11 @@ export class NotificationService {
 
       // Send real-time notification via WebSocket
       try {
+        // Import the WebSocket service from server
         const { io } = await import("../server")
-        const socketNotificationSent = io.to(`user_${userId}`).emit("notification", {
+        
+        // Use the WebSocket service's notifyUser method
+        const notificationSent = await io.notifyUser(userId, "notification", {
           id: notificationRecord.id,
           type: notification.type,
           title: notification.title,
@@ -307,11 +310,11 @@ export class NotificationService {
           timestamp: new Date(),
         })
 
-        console.log(`📡 WebSocket notification sent to user_${userId}`)
+        console.log(`📡 WebSocket notification sent to user_${userId}: ${notificationSent}`)
 
         // Also emit specific event for booking requests
         if (notification.type === "NEW_BOOKING_REQUEST" && notification.data?.bookingId) {
-          io.to(`user_${userId}`).emit("new_booking_request", {
+          await io.notifyUser(userId, "new_booking_request", {
             notificationId: notificationRecord.id,
             bookingId: notification.data.bookingId,
             ...notification.data,

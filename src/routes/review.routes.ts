@@ -11,6 +11,9 @@ const reviewController = new ReviewController()
 // Review submission and management
 router.post("/", authMiddleware, validateRequest(reviewValidation.submitReview), reviewController.submitReview)
 
+// Specific driver rating endpoint
+router.post("/driver-rating", authMiddleware, validateRequest(reviewValidation.submitDriverRating), reviewController.submitDriverRating)
+
 router.get("/", reviewController.getReviews)
 
 router.get("/:id", reviewController.getReviewById)

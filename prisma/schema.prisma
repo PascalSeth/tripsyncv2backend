@@ -187,16 +187,20 @@ model User {
   
   // Other relationships
   emergencyContacts  EmergencyContact[]
+  emergencyLocationShares EmergencyLocationShare[]
+  emergencyLocationUpdates EmergencyLocationUpdate[]
   notifications      Notification[]
   favoriteLocations  FavoriteLocation[]
   supportTickets     SupportTicket[]
   sessions           UserSession[]
   auditLogs          AuditLog[]
   userSubscriptions  UserSubscription[]
-  
+  cart               Cart?
+
   @@map("users")
   DriverNotification DriverNotification[] @relation("DriverNotifications")
   ordersAsCustomer    Order[]           @relation("CustomerOrders")
+  purchaseConfirmations PurchaseConfirmation[]
 }
 
 model UserSession {
@@ -682,7 +686,8 @@ model DriverProfile {
   documents            DriverDocument[]
   dayBookingConfig     DayBookingConfig?
   dayBookingAvailability DayBookingAvailability[]
-  
+    updatedAt          DateTime?             @updatedAt
+
   @@map("driver_profiles")
 }
 
@@ -1051,7 +1056,14 @@ model Booking {
   reviews           Review[]
   orderItems        OrderItem[]
   movingInventory   MovingInventoryItem[]
-  
+  emergencyLocationShares EmergencyLocationShare[]
+  emergencyLocationUpdates EmergencyLocationUpdate[]
+
+  // Day booking relationships
+  dayBookingStatusUpdates DayBookingStatusUpdate[]
+  dayBookingLocations     DayBookingLocation[]
+  dayBookingAlerts        DayBookingAlert[]
+
   @@map("bookings")
   DriverNotification DriverNotification[]
 }
@@ -1088,11 +1100,62 @@ model DayBookingAvailability {
   bookedSlots       String?       // JSON array of booked time slots
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
-  
+
   driverProfile     DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
-  
+
   @@unique([driverProfileId, date])
   @@map("day_booking_availability")
+}
+
+model DayBookingStatusUpdate {
+  id                String        @id @default(uuid())
+  bookingId         String
+  status            BookingStatus
+  message           String?
+  location          Json?         // Current location data
+  estimatedArrival  DateTime?
+  progress          Float?        // Progress percentage (0-100)
+  webhookSent       Boolean       @default(false)
+  createdAt         DateTime      @default(now())
+
+  booking           Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@map("day_booking_status_updates")
+}
+
+model DayBookingLocation {
+  id                String        @id @default(uuid())
+  bookingId         String
+  driverId          String
+  latitude          Float
+  longitude         Float
+  heading           Float?
+  speed             Float?
+  accuracy          Float?
+  timestamp         DateTime      @default(now())
+  isActive          Boolean       @default(true)
+
+  booking           Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, timestamp])
+  @@map("day_booking_locations")
+}
+
+model DayBookingAlert {
+  id                String        @id @default(uuid())
+  bookingId         String
+  alertType         String        // EMERGENCY, DELAY, LOCATION_ISSUE, etc.
+  severity          String        @default("MEDIUM") // LOW, MEDIUM, HIGH, CRITICAL
+  message           String
+  location          Json?         // Location where alert was triggered
+  resolved          Boolean       @default(false)
+  resolvedAt        DateTime?
+  resolutionNotes   String?
+  createdAt         DateTime      @default(now())
+
+  booking           Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@map("day_booking_alerts")
 }
 
 model DriverNotification {
@@ -1267,15 +1330,17 @@ model Store {
   contactEmail    String?
   operatingHours  String
   description     String?
+  image           String?
   rating          Float             @default(0)
   isActive        Boolean           @default(true)
-  
+
   location        Location          @relation(fields: [locationId], references: [id])
   owner           StoreOwnerProfile @relation(fields: [ownerId], references: [id])
-  
+
   products        Product[]
   businessHours   BusinessHours[]
-  
+  purchaseConfirmations PurchaseConfirmation[]
+
   @@map("stores")
   Order Order[]
 }
@@ -1558,12 +1623,49 @@ model EmergencyContact {
   userId       String
   name         String
   phone        String
+  email        String?
   relationship String
   isPrimary    Boolean @default(false)
-  
+
   user         User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
+
   @@map("emergency_contacts")
+}
+
+model EmergencyLocationShare {
+  id            String   @id @default(uuid())
+  userId        String
+  bookingId     String?
+  latitude      Float
+  longitude     Float
+  accuracy      Float?
+  address       String?
+  isRealTime    Boolean  @default(false)
+  sharedWith    String[] // Array of emergency contact IDs
+  createdAt     DateTime @default(now())
+  stoppedAt     DateTime?
+
+  user          User     @relation(fields: [userId], references: [id])
+  booking       Booking? @relation(fields: [bookingId], references: [id])
+
+  @@map("emergency_location_shares")
+}
+
+model EmergencyLocationUpdate {
+  id        String   @id @default(uuid())
+  userId    String
+  bookingId String?
+  latitude  Float
+  longitude Float
+  accuracy  Float?
+  heading   Float?
+  speed     Float?
+  timestamp DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id])
+  booking   Booking? @relation(fields: [bookingId], references: [id])
+
+  @@map("emergency_location_updates")
 }
 
 model FavoriteLocation {
@@ -1580,33 +1682,49 @@ model FavoriteLocation {
   @@map("favorite_locations")
 }
 
+model Category {
+  id            String        @id @default(uuid())
+  name          String        @unique
+  description   String?
+  imageUrl      String?
+  storeTypes    StoreType[]   // Array of store types this category applies to
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  subcategories Subcategory[]
+  products      Product[]
+  @@map("categories")
+}
+
 model Subcategory {
-  id          String      @id @default(uuid())
+  id          String    @id @default(uuid())
   name        String
   description String?
-  imageUrl   String?
-  category    Category
-  products    Product[]   @relation("ProductSubcategory")
+  imageUrl    String?
+  categoryId  String
+  category    Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  products    Product[] @relation("ProductSubcategory")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
   @@map("subcategories")
 }
-enum Category {
-  FOOD
-  GROCERY
-  PHARMACY
-}
+
 model Product {
-  id            String      @id @default(uuid())
+  id            String       @id @default(uuid())
   storeId       String
   name          String
   description   String?
   price         Float
-  category      Category
+  categoryId    String
+  category      Category     @relation(fields: [categoryId], references: [id])
   subcategoryId String?
   subcategory   Subcategory? @relation("ProductSubcategory", fields: [subcategoryId], references: [id])
   image         String?
-  inStock       Boolean     @default(true)
-  stockQuantity Int         @default(0)
-  store         Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  inStock       Boolean      @default(true)
+  stockQuantity Int          @default(0)
+  store         Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  cartItems     CartItem[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
   @@map("products")
 }
 
@@ -1617,11 +1735,39 @@ model BusinessHours {
   openTime  String
   closeTime String
   isClosed  Boolean   @default(false)
-  
+
   store     Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  
+
   @@unique([storeId, dayOfWeek])
   @@map("business_hours")
+}
+
+// ===== CART SYSTEM =====
+
+model Cart {
+  id          String      @id @default(uuid())
+  userId      String      @unique
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items       CartItem[]
+
+  @@map("carts")
+}
+
+model CartItem {
+  id          String    @id @default(uuid())
+  cartId      String
+  productId   String
+  quantity    Int       @default(1)
+  unitPrice   Float     // Price at time of adding to cart
+  addedAt     DateTime  @default(now())
+
+  cart        Cart      @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("cart_items")
 }
 
 model PlaceAttribute {
@@ -1785,7 +1931,7 @@ model DeliveryDocument {
 
 model Delivery {
   id                    String            @id @default(uuid())
-orderId               String            @unique
+  orderId               String            @unique
   dispatchRiderId       String?
   pickupLocationId      String
   deliveryLocationId    String
@@ -1794,14 +1940,17 @@ orderId               String            @unique
   estimatedDeliveryTime DateTime?
   specialInstructions   String?
   status                DeliveryStatus    @default(PENDING)
-  
+
+  // Tracking code for user-to-user deliveries
+  trackingCode          String?           @unique
+
   // Timing fields
   assignedAt            DateTime?
   pickupStartedAt       DateTime?
   pickedUpAt            DateTime?
   deliveryStartedAt     DateTime?
   deliveredAt           DateTime?
-  
+
   // Completion data
   pickupNotes           String?
   pickupPhoto           String?
@@ -1809,26 +1958,27 @@ orderId               String            @unique
   deliveryPhoto         String?
   customerSignature     String?
   recipientName         String?
-  
+  recipientPhone        String?
+
   // Financial data
   finalDeliveryFee      Float?
   dispatchRiderEarning  Float?
   platformCommission    Float?
-  
+
   // Relationships
   order                 Order             @relation(fields: [orderId], references: [id])
   dispatchRider         DeliveryProfile?  @relation(fields: [dispatchRiderId], references: [userId])
   pickupLocation        Location          @relation("DeliveryPickupLocation", fields: [pickupLocationId], references: [id])
   deliveryLocation      Location          @relation("DeliveryDropoffLocation", fields: [deliveryLocationId], references: [id])
-  
+
   // Tracking and issues
   trackingUpdates       DeliveryTracking[]
   issues                DeliveryIssue[]
   rejections            DeliveryRejection[]
-  
+
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
-  
+
   @@map("deliveries")
 }
 
@@ -1882,25 +2032,55 @@ model Order {
   id                  String            @id @default(uuid())
   orderNumber         String            @unique
   customerId          String
-  storeId             String
+  storeId             String?           // Made optional for user-to-user deliveries
   deliveryLocationId  String?
+  serviceLocationId   String?           // Optional service location for specific delivery areas
   status              OrderStatus       @default(PENDING)
   totalAmount         Float
   deliveryFee         Float             @default(0)
   preparationNotes    String?
   readyForPickupAt    DateTime?
-  
+
   // Relationships
   customer            User              @relation("CustomerOrders", fields: [customerId], references: [id])
-  store               Store             @relation(fields: [storeId], references: [id])
+  store               Store?            @relation(fields: [storeId], references: [id]) // Made optional
   deliveryLocation    Location?         @relation("OrderDeliveryLocation", fields: [deliveryLocationId], references: [id])
+  serviceLocation     ServiceZone?      @relation(fields: [serviceLocationId], references: [id]) // Service zone for delivery
   orderItems          OrderItem[]
   delivery            Delivery?
-  
+  purchaseConfirmation PurchaseConfirmation?
+
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
-  
+
   @@map("orders")
+}
+
+model PurchaseConfirmation {
+  id                String                    @id @default(uuid())
+  orderId           String                    @unique
+  storeId           String
+  customerId        String
+  status            PurchaseConfirmationStatus @default(PENDING)
+  expiresAt         DateTime
+  confirmedAt       DateTime?
+  cancelledAt       DateTime?
+  confirmationToken String                    @unique
+
+  // Email notification tracking
+  emailSentAt       DateTime?
+  emailSentTo       String?
+  reminderSentAt    DateTime?
+
+  // Relationships
+  order             Order                     @relation(fields: [orderId], references: [id])
+  store             Store                     @relation(fields: [storeId], references: [id])
+  customer          User                      @relation(fields: [customerId], references: [id])
+
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  @@map("purchase_confirmations")
 }
 
 // Document management
@@ -1992,10 +2172,13 @@ model ServiceZone {
   // NEW: Booking relationships
   originBookings         Booking[]   @relation("OriginZone")
   destinationBookings    Booking[]   @relation("DestinationZone")
-  
+
+  // Order relationships
+  orders                 Order[]
+
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
-  
+
   @@map("service_zones")
 }
 
@@ -2180,6 +2363,7 @@ enum ServiceZoneType {
 
 enum BookingStatus {
   PENDING
+  DRIVER_EN_ROUTE // Add this line
   CONFIRMED
   DRIVER_ASSIGNED
   DRIVER_ARRIVED
@@ -2399,6 +2583,7 @@ enum NotificationType {
   ACCOUNT_UPDATE
   SECURITY_ALERT
   BOOKING_UPDATE
+  BOOKING_CONFIRMED
   PAYMENT_UPDATE
   PROMOTION
   SYSTEM_ALERT
@@ -2418,6 +2603,11 @@ enum NotificationType {
   PAYOUT_PROCESSED
   NEW_BOOKING_REQUEST
   DAY_BOOKING_ASSIGNED
+  DAY_BOOKING_REASSIGNED
+  DAY_BOOKING_REMINDER_1H
+  DAY_BOOKING_STARTED
+  DAY_BOOKING_COMPLETED
+  DAY_BOOKING_CANCELLED
   NEW_FOOD_ORDER
   NEW_MOVING_JOB
   BOOKING_CANCELLED
@@ -2477,6 +2667,9 @@ enum NotificationType {
   DELIVERY_ISSUE_REPORTED
   ORDER_READY
   NEW_DELIVERY_REQUEST
+  PURCHASE_CONFIRMED
+  PURCHASE_EXPIRED
+  ORDER_STATUS_UPDATE
 }
 
 enum SupportCategory {
@@ -2541,12 +2734,25 @@ enum DeliveryStatus {
 
 enum OrderStatus {
   PENDING
-  CONFIRMED
+  ORDER_PROCESSING
+  ORDER_CONFIRMED
+  WAITING_COURIER
+  COURIER_PICKING_UP
+  COURIER_ON_WAY
+  COURIER_ARRIVED
   PREPARING
   READY_FOR_PICKUP
   PICKED_UP
   IN_TRANSIT
   DELIVERED
+  ORDER_REJECTED
   CANCELLED
   REFUNDED
+}
+
+enum PurchaseConfirmationStatus {
+  PENDING
+  CONFIRMED
+  EXPIRED
+  CANCELLED
 }

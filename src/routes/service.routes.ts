@@ -32,4 +32,7 @@ router.post("/places/survey", serviceController.submitPlaceSurvey)
 router.get("/zones", serviceController.getServiceZones)
 router.get("/zones/coverage", serviceController.checkServiceCoverage)
 
+// Public service zones endpoint for onboarding (no auth required)
+router.get("/service-zones", serviceController.getServiceZones)
+
 export default router

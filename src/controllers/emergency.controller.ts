@@ -113,6 +113,28 @@ export class EmergencyController {
 
       const booking = await this.emergencyService.acceptEmergencyCall(bookingId, responderId)
 
+      // Notify customer via WebSocket about responder assignment
+      try {
+        const { io } = await import("../server")
+        await io.notifyUser(booking.customerId, "emergency_responder_assigned", {
+          bookingId,
+          responderId,
+          responderName: booking.provider?.firstName + " " + booking.provider?.lastName,
+          responderPhone: booking.provider?.phone,
+          timestamp: new Date(),
+        })
+
+        // Notify responder to join emergency booking room
+        await io.notifyUser(responderId, "emergency_booking_joined", {
+          bookingId,
+          customerId: booking.customerId,
+          customerName: booking.customer?.firstName + " " + booking.customer?.lastName,
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to send WebSocket notifications for emergency call acceptance:", error)
+      }
+
       res.json({
         success: true,
         message: "Emergency call accepted successfully",
@@ -201,6 +223,20 @@ export class EmergencyController {
         longitude,
         isOnDuty,
       })
+
+      // Broadcast location update via WebSocket
+      try {
+        const { io } = await import("../server")
+        await io.broadcastToRole("USER", "emergency_responder_location_update", {
+          responderId,
+          latitude,
+          longitude,
+          isOnDuty,
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to broadcast emergency responder location update:", error)
+      }
 
       res.json({
         success: true,
@@ -548,6 +584,219 @@ export class EmergencyController {
       res.status(500).json({
         success: false,
         message: "Failed to verify emergency responder",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  // Emergency contacts management
+  addEmergencyContact = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user!.id
+      const { name, phone, email, relationship } = req.body
+
+      const contact = await this.emergencyService.addEmergencyContact(userId, {
+        name,
+        phone,
+        email,
+        relationship,
+      })
+
+      res.status(201).json({
+        success: true,
+        message: "Emergency contact added successfully",
+        data: contact,
+      })
+    } catch (error) {
+      logger.error("Add emergency contact error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to add emergency contact",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  getEmergencyContacts = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user!.id
+
+      const contacts = await this.emergencyService.getEmergencyContacts(userId)
+
+      res.json({
+        success: true,
+        message: "Emergency contacts retrieved successfully",
+        data: contacts,
+      })
+    } catch (error) {
+      logger.error("Get emergency contacts error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve emergency contacts",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  removeEmergencyContact = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user!.id
+      const contactId = req.params.contactId
+
+      await this.emergencyService.removeEmergencyContact(userId, contactId)
+
+      res.json({
+        success: true,
+        message: "Emergency contact removed successfully",
+      })
+    } catch (error) {
+      logger.error("Remove emergency contact error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to remove emergency contact",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  // Location sharing functionality
+  shareLocation = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user!.id
+      const { latitude, longitude, accuracy, address, isRealTime = false, bookingId } = req.body
+
+      const result = await this.emergencyService.shareLocationWithEmergencyContacts(
+        userId,
+        {
+          latitude,
+          longitude,
+          accuracy,
+          address,
+        },
+        isRealTime,
+        bookingId
+      )
+
+      res.json({
+        success: true,
+        message: `Location shared with ${result.sharedCount} emergency contacts`,
+        data: result,
+      })
+    } catch (error) {
+      logger.error("Share location error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to share location",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  getLocationSharingHistory = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user!.id
+      const { limit = 50 } = req.query
+
+      const history = await this.emergencyService.getLocationSharingHistory(userId, Number(limit))
+
+      res.json({
+        success: true,
+        message: "Location sharing history retrieved successfully",
+        data: history,
+      })
+    } catch (error) {
+      logger.error("Get location sharing history error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve location sharing history",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  stopLocationSharing = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user!.id
+      const { bookingId } = req.body
+
+      const result = await this.emergencyService.stopLocationSharing(userId, bookingId)
+
+      res.json({
+        success: true,
+        message: `Location sharing stopped for ${result.stoppedCount} active shares`,
+        data: result,
+      })
+    } catch (error) {
+      logger.error("Stop location sharing error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to stop location sharing",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  // Track user location during emergency
+  trackUserLocation = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user!.id
+      const { latitude, longitude, accuracy, heading, speed, bookingId } = req.body
+
+      // Store location update
+      await prisma.emergencyLocationUpdate.create({
+        data: {
+          userId,
+          bookingId,
+          latitude,
+          longitude,
+          accuracy,
+          heading,
+          speed,
+          timestamp: new Date(),
+        },
+      })
+
+      // Broadcast location update via WebSocket
+      try {
+        const { io } = await import("../server")
+        await io.emitToRoom(`emergency_booking:${bookingId}`, "emergency_user_location_update", {
+          userId,
+          bookingId,
+          latitude,
+          longitude,
+          accuracy,
+          heading,
+          speed,
+          timestamp: new Date(),
+        })
+
+        // Also notify emergency contacts if real-time sharing is active
+        const contacts = await this.emergencyService.getEmergencyContacts(userId)
+        for (const contact of contacts) {
+          await io.notifyUser(contact.id, "emergency_user_location_update", {
+            userId,
+            bookingId,
+            latitude,
+            longitude,
+            accuracy,
+            heading,
+            speed,
+            timestamp: new Date(),
+          })
+        }
+      } catch (error) {
+        logger.warn("Failed to broadcast user location update:", error)
+      }
+
+      res.json({
+        success: true,
+        message: "User location updated successfully",
+      })
+    } catch (error) {
+      logger.error("Track user location error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to track user location",
         error: error instanceof Error ? error.message : "Unknown error",
       })
     }

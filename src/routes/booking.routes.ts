@@ -12,9 +12,6 @@ router.use(authenticateToken)
 router.post("/", bookingController.createBooking)
 router.get("/", bookingController.getBookings)
 router.get("/:id", bookingController.getBookingById)
-router.put("/:id/accept", requireRole(["DRIVER", "DELIVERY_PERSON", "MOVER"]), bookingController.acceptBooking)
-router.put("/:id/start", requireRole(["DRIVER", "DELIVERY_PERSON", "MOVER"]), bookingController.startBooking)
-router.put("/:id/complete", requireRole(["DRIVER", "DELIVERY_PERSON", "MOVER"]), bookingController.completeBooking)
 router.put("/:id/cancel", bookingController.cancelBooking)
 
 // Service-specific booking routes
@@ -32,10 +29,7 @@ router.post("/estimate", bookingController.getBookingEstimate)
 
 // Tracking
 router.get("/:id/tracking", bookingController.getBookingTracking)
-router.post(
-  "/:id/tracking",
-  requireRole(["DRIVER", "DELIVERY_PERSON", "MOVER"]),
-  bookingController.updateBookingTracking,
-)
+router.get("/:id/status",  bookingController.getBookingStatus);
+
 
 export default router

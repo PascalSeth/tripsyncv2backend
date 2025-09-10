@@ -78,4 +78,41 @@ export const emergencyValidation = {
       isOnDuty: Joi.boolean().required(),
     }),
   }),
+
+  addEmergencyContact: Joi.object({
+    body: Joi.object({
+      name: Joi.string().required(),
+      phone: Joi.string().required(),
+      email: Joi.string().email().optional(),
+      relationship: Joi.string().required(),
+    }),
+  }),
+
+  shareLocation: Joi.object({
+    body: Joi.object({
+      latitude: Joi.number().required(),
+      longitude: Joi.number().required(),
+      accuracy: Joi.number().optional(),
+      address: Joi.string().optional(),
+      isRealTime: Joi.boolean().optional(),
+      bookingId: Joi.string().optional(),
+    }),
+  }),
+
+  stopLocationSharing: Joi.object({
+    body: Joi.object({
+      bookingId: Joi.string().optional(),
+    }),
+  }),
+
+  trackUserLocation: Joi.object({
+    body: Joi.object({
+      latitude: Joi.number().required(),
+      longitude: Joi.number().required(),
+      accuracy: Joi.number().optional(),
+      heading: Joi.number().optional(),
+      speed: Joi.number().optional(),
+      bookingId: Joi.string().optional(),
+    }),
+  }),
 }

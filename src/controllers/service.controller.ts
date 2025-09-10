@@ -198,12 +198,22 @@ export class ServiceController {
 
   getAvailableDrivers = async (req: AuthenticatedRequest, res: Response) => {
     try {
+      const { serviceType = "RIDE" } = req.query
+
+      // Base query for available drivers
+      const baseWhere = {
+        isAvailable: true,
+        isOnline: true,
+        isVerified: true,
+      }
+
+      // Add day booking specific filters if requested
+      if (serviceType === "DAY_BOOKING") {
+        (baseWhere as any).isAvailableForDayBooking = true
+      }
+
       const drivers = await prisma.driverProfile.findMany({
-        where: {
-          isAvailable: true,
-          isOnline: true,
-          isVerified: true,
-        },
+        where: baseWhere,
         include: {
           user: {
             select: {
@@ -214,13 +224,72 @@ export class ServiceController {
             },
           },
           vehicle: true,
+          dayBookingConfig: serviceType === "DAY_BOOKING" ? {
+            select: {
+              hourlyRate: true,
+              minimumHours: true,
+              maximumHours: true,
+              serviceAreas: true,
+              availableDays: true,
+              availableTimeSlots: true,
+              specialRequirements: true,
+              isActive: true,
+            }
+          } : false,
+          dayBookingAvailability: serviceType === "DAY_BOOKING" ? {
+            where: {
+              date: {
+                gte: new Date(),
+              },
+              isAvailable: true,
+            },
+            select: {
+              date: true,
+              timeSlots: true,
+            },
+            orderBy: {
+              date: 'asc',
+            },
+            take: 7, // Next 7 days availability
+          } : false,
         },
+      })
+
+      // Transform the data to include service area information
+      const transformedDrivers = drivers.map(driver => {
+        const driverData: any = {
+          userId: driver.userId,
+          user: driver.user,
+          vehicle: driver.vehicle,
+          rating: driver.rating,
+          totalRides: driver.totalRides,
+          totalEarnings: driver.totalEarnings,
+          isAvailable: driver.isAvailable,
+          isOnline: driver.isOnline,
+          currentLatitude: driver.currentLatitude,
+          currentLongitude: driver.currentLongitude,
+          heading: driver.heading,
+          isAvailableForDayBooking: driver.isAvailableForDayBooking,
+        }
+
+        // Add day booking specific data if available
+        if (serviceType === "DAY_BOOKING" && driver.dayBookingConfig) {
+          driverData.dayBookingConfig = {
+            ...driver.dayBookingConfig,
+            serviceAreas: driver.dayBookingConfig.serviceAreas ? JSON.parse(driver.dayBookingConfig.serviceAreas) : [],
+            availableDays: driver.dayBookingConfig.availableDays ? JSON.parse(driver.dayBookingConfig.availableDays) : [],
+            availableTimeSlots: driver.dayBookingConfig.availableTimeSlots ? JSON.parse(driver.dayBookingConfig.availableTimeSlots) : [],
+          }
+          driverData.dayBookingAvailability = driver.dayBookingAvailability
+        }
+
+        return driverData
       })
 
       res.json({
         success: true,
         message: "Available drivers retrieved successfully",
-        data: drivers,
+        data: transformedDrivers,
       })
     } catch (error) {
       logger.error("Get available drivers error:", error)

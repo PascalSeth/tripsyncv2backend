@@ -1,4 +1,4 @@
-import type { Request, Response } from "express"
+import type { Request, Response, NextFunction } from "express"
 import type { AuthenticatedRequest } from "../types"
 import prisma from "../config/database"
 import { StoreService } from "../services/store.service"
@@ -39,106 +39,59 @@ export class StoreController {
   // File upload middleware
   uploadProductImages = upload.array("images", 5) // Allow up to 5 images
   uploadStoreImage = upload.single("image")
+  uploadCategoryImage = upload.single("image")
+  uploadSubcategoryImage = upload.single("image")
 
-  // UNIFIED: Handle both new user creation and existing user onboarding
+  // Middleware to debug raw multipart data
+  debugMultipart = (req: Request, res: Response, next: NextFunction) => {
+    console.log("[v0] debugMultipart - Content-Type:", req.headers["content-type"])
+    console.log("[v0] debugMultipart - Content-Length:", req.headers["content-length"])
+    console.log("[v0] debugMultipart - Raw body type:", typeof req.body)
+    console.log("[v0] debugMultipart - Raw body:", req.body)
+    next()
+  }
+
   onboardStoreOwner = async (req: AuthenticatedRequest | Request, res: Response) => {
     try {
-      // Log incoming request data for debugging
-      console.log("=== STORE OWNER ONBOARDING REQUEST ===")
-      console.log("Request body:", JSON.stringify(req.body, null, 2))
-      console.log("Request user:", (req as AuthenticatedRequest).user)
-      console.log("=========================================")
+      const { businessLicense, businessType, taxId } = req.body
 
-      const {
-        // User data (for new user creation)
-        email,
-        phone,
-        password,
-        firstName,
-        lastName,
-        gender,
-        dateOfBirth,
-        // Store owner profile details
-        businessLicense,
-        taxId,
-        businessType,
-        // Store details (optional)
-        storeInfo,
-      } = req.body
-
-      // Log extracted data
-      console.log("=== EXTRACTED DATA ===")
-      console.log("email:", email)
-      console.log("phone:", phone)
-      console.log("businessLicense:", businessLicense)
-      console.log("businessType:", businessType)
-      console.log("hasAuthenticatedUser:", !!(req as AuthenticatedRequest).user?.id)
-      console.log("=====================")
-
-      // Check if this is for an existing user or creating a new one
+      // Check if this is for an existing authenticated user
       let userId = (req as AuthenticatedRequest).user?.id
       let user = null
-      let isExistingUser = false
 
       if (!userId) {
-        // Create new user for store owner onboarding
-        if (!email || !phone || !firstName || !lastName || !businessLicense || !businessType) {
+        // For new users, require basic user info
+        const { email, phone, firstName, lastName, password } = req.body
+
+        if (!email || !phone || !firstName || !lastName) {
           return res.status(400).json({
             success: false,
-            message:
-              "Email, phone, firstName, lastName, businessLicense, and businessType are required for new store owner registration",
+            message: "Email, phone, firstName, and lastName are required for new users",
           })
         }
 
-        // Check if user already exists by email OR phone
+        // Check if user already exists
         const existingUser = await prisma.user.findFirst({
-          where: {
-            OR: [{ email }, { phone }],
-          },
+          where: { OR: [{ email }, { phone }] },
         })
 
         if (existingUser) {
-          // User exists, check if they already have a store owner profile
-          const existingStoreOwnerProfile = await prisma.storeOwnerProfile.findUnique({
+          const existingProfile = await prisma.storeOwnerProfile.findUnique({
             where: { userId: existingUser.id },
           })
 
-          if (existingStoreOwnerProfile) {
+          if (existingProfile) {
             return res.status(400).json({
               success: false,
               message: "User already has a store owner profile",
             })
           }
 
-          // User exists but no store owner profile, use existing user
           userId = existingUser.id
           user = existingUser
-          isExistingUser = true
-
-          // Update existing user with additional store owner info if provided
-          user = await prisma.user.update({
-            where: { id: userId },
-            data: {
-              role: "STORE_OWNER",
-              // Update other fields if they're different/missing
-              ...(firstName && firstName !== existingUser.firstName && { firstName }),
-              ...(lastName && lastName !== existingUser.lastName && { lastName }),
-              ...(phone && phone !== existingUser.phone && { phone }),
-              ...(gender && !existingUser.gender && { gender }),
-              ...(dateOfBirth && !existingUser.dateOfBirth && { dateOfBirth: new Date(dateOfBirth) }),
-              // Update commission settings
-              subscriptionStatus: "ACTIVE",
-              subscriptionTier: "BASIC",
-              nextCommissionDue: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
-              commissionBalance: 0,
-              isCommissionCurrent: true,
-            },
-          })
         } else {
-          // Generate referral code
-          const referralCode = `SO${Date.now().toString().slice(-6)}`
-
           // Create new user
+          const referralCode = `SO${Date.now().toString().slice(-6)}`
           user = await prisma.user.create({
             data: {
               email,
@@ -146,27 +99,20 @@ export class StoreController {
               firstName,
               lastName,
               passwordHash: password ? await bcrypt.hash(password, 12) : null,
-              gender: gender || null,
-              dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
               role: "STORE_OWNER",
               referralCode,
               isActive: true,
-              isVerified: false,
-              mobileMoneyVerified: false,
-              bankAccountVerified: false,
-              // Commission settings
               subscriptionStatus: "ACTIVE",
               subscriptionTier: "BASIC",
-              nextCommissionDue: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
+              nextCommissionDue: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
               commissionBalance: 0,
               isCommissionCurrent: true,
             },
           })
-
           userId = user.id
         }
       } else {
-        // Check if store owner profile already exists for existing authenticated user
+        // Check if authenticated user already has store owner profile
         const existingProfile = await prisma.storeOwnerProfile.findUnique({
           where: { userId },
         })
@@ -174,24 +120,21 @@ export class StoreController {
         if (existingProfile) {
           return res.status(400).json({
             success: false,
-            message: "Store owner profile already exists for this user",
+            message: "Store owner profile already exists",
           })
         }
 
-        // Update existing authenticated user role to STORE_OWNER
+        // Update existing user role
         user = await prisma.user.update({
           where: { id: userId },
           data: {
             role: "STORE_OWNER",
-            // Update commission settings
             subscriptionStatus: "ACTIVE",
             subscriptionTier: "BASIC",
             nextCommissionDue: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
             isCommissionCurrent: true,
           },
         })
-
-        isExistingUser = true
       }
 
       // Create store owner profile
@@ -199,7 +142,7 @@ export class StoreController {
         data: {
           userId,
           businessLicense,
-          taxId,
+          taxId: taxId || null,
           businessType,
           verificationStatus: "PENDING",
           monthlyCommissionDue: 0,
@@ -207,7 +150,7 @@ export class StoreController {
         },
       })
 
-      // Create customer profile (for flexibility - users can be both customers and store owners)
+      // Create customer profile if it doesn't exist
       const existingCustomerProfile = await prisma.customerProfile.findUnique({
         where: { userId },
       })
@@ -229,51 +172,15 @@ export class StoreController {
         })
       }
 
-      // Create initial store if provided
-      let store = null
-      if (storeInfo) {
-        console.log("=== CREATING STORE ===")
-        console.log("storeInfo:", JSON.stringify(storeInfo, null, 2))
-        console.log("storeOwnerProfile.id:", storeOwnerProfile.id)
+      // Send notification
+      await this.notificationService.notifyCustomer(userId, {
+        type: "STORE_OWNER_ONBOARDING",
+        title: "Store Owner Application Submitted",
+        body: "Your store owner application has been submitted for review.",
+        priority: "STANDARD",
+      })
 
-        try {
-          store = await this.storeService.createStore(storeOwnerProfile.id, storeInfo)
-          console.log("Store created successfully:", store)
-        } catch (storeError) {
-          console.error("Error creating store:", storeError)
-          logger.error("Error creating store during onboarding:", storeError)
-          // Don't throw error here, just log it so onboarding can continue
-        }
-
-        console.log("======================")
-      }
-
-      // Send appropriate notifications
-      if (isExistingUser) {
-        await this.notificationService.notifyCustomer(userId, {
-          type: "STORE_OWNER_ONBOARDING",
-          title: "Store Owner Application Submitted",
-          body: "Your store owner application has been submitted for review. We'll notify you once it's approved.",
-          priority: "STANDARD",
-        })
-      } else {
-        // Send welcome notification for new users
-        await this.notificationService.notifyCustomer(userId, {
-          type: "STORE_OWNER_ONBOARDING",
-          title: "Welcome to TripSync Store!",
-          body: "Your store owner account has been created successfully. Please verify your email and phone number.",
-          priority: "STANDARD",
-        })
-
-        await this.notificationService.notifyCustomer(userId, {
-          type: "VERIFICATION_APPROVED",
-          title: "Account Verification Required",
-          body: "Please complete your account verification to start creating stores.",
-          priority: "URGENT",
-        })
-      }
-
-      // Get complete profile data to return
+      // Get complete profile data
       const completeProfile = await prisma.storeOwnerProfile.findUnique({
         where: { id: storeOwnerProfile.id },
         include: {
@@ -287,23 +194,6 @@ export class StoreController {
               avatar: true,
               role: true,
               isVerified: true,
-              mobileMoneyProvider: true,
-              mobileMoneyNumber: true,
-              mobileMoneyAccountName: true,
-              bankName: true,
-              bankAccountNumber: true,
-              bankAccountName: true,
-              bankCode: true,
-            },
-          },
-          stores: {
-            include: {
-              location: true,
-              _count: {
-                select: {
-                  products: true,
-                },
-              },
             },
           },
         },
@@ -311,15 +201,8 @@ export class StoreController {
 
       res.status(201).json({
         success: true,
-        message: isExistingUser
-          ? "Store owner profile added to existing user successfully"
-          : "Store owner onboarding completed successfully",
-        data: {
-          user: completeProfile?.user,
-          storeOwnerProfile: completeProfile,
-          store,
-          isExistingUser,
-        },
+        message: "Store owner onboarding completed successfully",
+        data: completeProfile,
       })
     } catch (error) {
       logger.error("Store owner onboarding error:", error)
@@ -342,18 +225,59 @@ export class StoreController {
         storeData.image = imageUrl
       }
 
-      const storeOwnerProfile = await prisma.storeOwnerProfile.findUnique({
-        where: { userId },
+      // Get user details to check role
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
       })
 
-      if (!storeOwnerProfile || storeOwnerProfile.verificationStatus !== "APPROVED") {
-        return res.status(403).json({
+      if (!user) {
+        return res.status(404).json({
           success: false,
-          message: "Store owner profile not found or not verified",
+          message: "User not found",
         })
       }
 
-      const store = await this.storeService.createStore(storeOwnerProfile.id, storeData)
+      let storeOwnerProfileId: string
+
+      if (user.role === "SUPER_ADMIN") {
+        // Super admin can create stores without store owner profile requirements
+        let storeOwnerProfile = await prisma.storeOwnerProfile.findUnique({
+          where: { userId },
+        })
+
+        if (!storeOwnerProfile) {
+          // Create store owner profile for super admin if it doesn't exist
+          storeOwnerProfile = await prisma.storeOwnerProfile.create({
+            data: {
+              userId,
+              businessLicense: "SUPER_ADMIN_AUTO_GENERATED",
+              taxId: null,
+              businessType: "OTHER",
+              verificationStatus: "APPROVED",
+              monthlyCommissionDue: 0,
+              commissionStatus: "CURRENT",
+            },
+          })
+        }
+
+        storeOwnerProfileId = storeOwnerProfile.id
+      } else {
+        // Regular store owner flow
+        const storeOwnerProfile = await prisma.storeOwnerProfile.findUnique({
+          where: { userId },
+        })
+
+        if (!storeOwnerProfile || storeOwnerProfile.verificationStatus !== "APPROVED") {
+          return res.status(403).json({
+            success: false,
+            message: "Store owner profile not found or not verified",
+          })
+        }
+
+        storeOwnerProfileId = storeOwnerProfile.id
+      }
+
+      const store = await this.storeService.createStore(storeOwnerProfileId, storeData)
 
       res.status(201).json({
         success: true,
@@ -372,6 +296,7 @@ export class StoreController {
 
   getStores = async (req: AuthenticatedRequest, res: Response) => {
     try {
+      const userId = req.user?.id // Get user ID from authenticated request
       const {
         page = 1,
         limit = 20,
@@ -382,26 +307,41 @@ export class StoreController {
         latitude,
         longitude,
         radius = 10000,
-        isActive = true,
+        isActive,
       } = req.query
 
-      const stores = await this.storeService.getStores({
+      logger.info(`GetStores request - userId: ${userId}, params:`, {
+        page, limit, search, type, category, subcategoryId, latitude, longitude, radius, isActive
+      })
+
+      const { stores, pagination } = await this.storeService.getStores({
         page: Number(page),
         limit: Number(limit),
         search: search as string,
         type: type as string,
-        category: category as string, // This will be the enum value (FOOD, GROCERY, PHARMACY)
-        subcategoryId: subcategoryId as string,
+        categoryId: (category && category !== "undefined" && category !== "") ? category as string : undefined,
+        subcategoryId: (subcategoryId && subcategoryId !== "undefined" && subcategoryId !== "") ? subcategoryId as string : undefined,
         latitude: latitude ? Number(latitude) : undefined,
         longitude: longitude ? Number(longitude) : undefined,
         radius: Number(radius),
-        isActive: isActive === "true",
+        isActive: userId ? (isActive === "true") : undefined, // Only apply isActive filter for authenticated users
+        userId, // Pass user ID for role-based filtering
+      })
+
+      // Disable caching for this endpoint
+      res.set({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
       })
 
       res.json({
         success: true,
         message: "Stores retrieved successfully",
-        data: stores,
+        data: {
+          stores,
+          pagination,
+        },
       })
     } catch (error) {
       logger.error("Get stores error:", error)
@@ -494,10 +434,35 @@ export class StoreController {
   // Subcategory Management (Super Admin only)
   createSubcategory = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const userId = req.user!.id
-      const { name, description, category, imageUrl } = req.body
+      console.log("[v0] createSubcategory - req.body:", req.body)
+      console.log("[v0] createSubcategory - req.file:", req.file)
 
-      // Check if user is super admin
+      const name = req.body.name
+      const description = req.body.description
+      const categoryId = req.body.categoryId
+      const imageFile = req.file
+      const userId = req.user!.id
+
+      console.log("[v0] createSubcategory - extracted name:", name)
+      console.log("[v0] createSubcategory - extracted description:", description)
+      console.log("[v0] createSubcategory - extracted categoryId:", categoryId)
+
+      if (!name) {
+        console.log("[v0] createSubcategory - name validation failed")
+        return res.status(400).json({
+          success: false,
+          message: "Subcategory name is required",
+        })
+      }
+
+      if (!categoryId) {
+        console.log("[v0] createSubcategory - categoryId validation failed")
+        return res.status(400).json({
+          success: false,
+          message: "Category ID is required",
+        })
+      }
+
       const user = await prisma.user.findUnique({
         where: { id: userId },
       })
@@ -509,36 +474,45 @@ export class StoreController {
         })
       }
 
-      // Validate category enum
-      const validCategories = ["FOOD", "GROCERY", "PHARMACY"]
-      if (!validCategories.includes(category)) {
+      const category = await prisma.category.findUnique({
+        where: { id: categoryId },
+      })
+
+      if (!category) {
         return res.status(400).json({
           success: false,
-          message: "Invalid category. Must be one of: FOOD, GROCERY, PHARMACY",
+          message: "Invalid category ID. Category does not exist.",
         })
       }
 
-      // Check if subcategory already exists in this category
       const existingSubcategory = await prisma.subcategory.findFirst({
         where: {
-          name,
-          category,
+          name: name.trim(),
+          categoryId: categoryId,
         },
       })
 
       if (existingSubcategory) {
         return res.status(400).json({
           success: false,
-          message: "Subcategory already exists in this category",
+          message: "Subcategory with this name already exists in this category",
         })
+      }
+
+      let imageUrl = null
+      if (imageFile) {
+        imageUrl = await this.fileUploadService.uploadImage(imageFile, "subcategories")
       }
 
       const subcategory = await prisma.subcategory.create({
         data: {
-          name,
-          description,
-          category,
+          name: name.trim(),
+          description: description?.trim() || null,
           imageUrl,
+          categoryId,
+        },
+        include: {
+          category: true,
         },
       })
 
@@ -548,6 +522,7 @@ export class StoreController {
         data: subcategory,
       })
     } catch (error) {
+      console.log("[v0] createSubcategory - error occurred:", error)
       logger.error("Create subcategory error:", error)
       res.status(500).json({
         success: false,
@@ -610,11 +585,16 @@ export class StoreController {
 
   updateSubcategory = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const subcategoryId = req.params.id
+      const { subcategoryId } = req.params
+      const name = req.body.name
+      const description = req.body.description
+      const categoryId = req.body.categoryId
+      const imageFile = req.file
       const userId = req.user!.id
-      const updateData = req.body
 
-      // Check if user is super admin
+      console.log("[v0] updateSubcategory - req.body:", req.body)
+      console.log("[v0] updateSubcategory - req.file:", req.file)
+
       const user = await prisma.user.findUnique({
         where: { id: userId },
       })
@@ -626,35 +606,43 @@ export class StoreController {
         })
       }
 
-      // Validate category enum if provided
-      if (updateData.category) {
-        const validCategories = ["FOOD", "GROCERY", "PHARMACY"]
-        if (!validCategories.includes(updateData.category)) {
+      if (categoryId) {
+        const category = await prisma.category.findUnique({
+          where: { id: categoryId },
+        })
+
+        if (!category) {
           return res.status(400).json({
             success: false,
-            message: "Invalid category. Must be one of: FOOD, GROCERY, PHARMACY",
+            message: "Invalid category ID. Category does not exist.",
           })
         }
       }
 
-      const subcategory = await prisma.subcategory.update({
+      const updateData: any = {}
+      if (name) updateData.name = name.trim()
+      if (description !== undefined) updateData.description = description?.trim() || null
+      if (categoryId) updateData.categoryId = categoryId
+
+      if (imageFile) {
+        updateData.imageUrl = await this.fileUploadService.uploadImage(imageFile, "subcategories")
+      }
+
+      const updatedSubcategory = await prisma.subcategory.update({
         where: { id: subcategoryId },
         data: updateData,
         include: {
-          _count: {
-            select: {
-              products: true,
-            },
-          },
+          category: true,
         },
       })
 
       res.json({
         success: true,
         message: "Subcategory updated successfully",
-        data: subcategory,
+        data: updatedSubcategory,
       })
     } catch (error) {
+      console.log("[v0] updateSubcategory - error occurred:", error)
       logger.error("Update subcategory error:", error)
       res.status(500).json({
         success: false,
@@ -666,10 +654,9 @@ export class StoreController {
 
   deleteSubcategory = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const subcategoryId = req.params.id
+      const subcategoryId = req.params.subcategoryId
       const userId = req.user!.id
 
-      // Check if user is super admin
       const user = await prisma.user.findUnique({
         where: { id: userId },
       })
@@ -681,7 +668,6 @@ export class StoreController {
         })
       }
 
-      // Check if subcategory has products
       const subcategory = await prisma.subcategory.findUnique({
         where: { id: subcategoryId },
         include: {
@@ -725,15 +711,19 @@ export class StoreController {
     }
   }
 
-  // Get categories (enum values with subcategories)
+  // Get categories
   getCategories = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const categories = ["FOOD", "GROCERY", "PHARMACY"]
+      const { storeType } = req.query // Add storeType parameter
 
-      const categoriesWithSubcategories = await Promise.all(
-        categories.map(async (category) => {
-          const subcategories = await prisma.subcategory.findMany({
-            where: { category: category as any },
+      const categories = await prisma.category.findMany({
+        where: storeType ? {
+          storeTypes: {
+            has: storeType as any
+          }
+        } : {},
+        include: {
+          subcategories: {
             include: {
               _count: {
                 select: {
@@ -742,37 +732,45 @@ export class StoreController {
               },
             },
             orderBy: { name: "asc" },
-          })
+          },
+          _count: {
+            select: {
+              products: true,
+            },
+          },
+        },
+        orderBy: { name: "asc" },
+      })
 
+      const categoriesWithStoreCounts = await Promise.all(
+        categories.map(async (category) => {
           const storeCount = await prisma.store.count({
             where: {
+              type: storeType ? { in: category.storeTypes } : undefined,
               products: {
                 some: {
-                  category: category as any,
+                  categoryId: category.id,
                 },
               },
             },
           })
 
           return {
-            name: category,
-            subcategories,
+            ...category,
             storeCount,
-            subcategoryCount: subcategories.length,
           }
         }),
       )
 
       res.json({
         success: true,
-        message: "Categories retrieved successfully",
-        data: categoriesWithSubcategories,
+        data: categoriesWithStoreCounts,
       })
     } catch (error) {
       logger.error("Get categories error:", error)
       res.status(500).json({
         success: false,
-        message: "Failed to retrieve categories",
+        message: "Failed to get categories",
         error: error instanceof Error ? error.message : "Unknown error",
       })
     }
@@ -785,7 +783,6 @@ export class StoreController {
       const userId = req.user!.id
       const productData = req.body
 
-      // Handle multiple image uploads
       const images: string[] = []
       if (req.files && Array.isArray(req.files)) {
         for (const file of req.files) {
@@ -796,7 +793,7 @@ export class StoreController {
 
       if (images.length > 0) {
         productData.images = images
-        productData.image = images[0] // Set first image as primary
+        productData.image = images[0]
       }
 
       const product = await this.storeService.addProduct(storeId, productData, userId)
@@ -816,7 +813,7 @@ export class StoreController {
     }
   }
 
-  getProducts = async (req: AuthenticatedRequest, res: Response) => {
+  getProducts = async (req: Request, res: Response) => {
     try {
       const storeId = req.params.id
       const { page = 1, limit = 20, search, category, subcategoryId, inStock } = req.query
@@ -825,7 +822,7 @@ export class StoreController {
         page: Number(page),
         limit: Number(limit),
         search: search as string,
-        category: category as string,
+        categoryId: category as string,
         subcategoryId: subcategoryId as string,
         inStock: inStock === "true",
       })
@@ -851,7 +848,6 @@ export class StoreController {
       const userId = req.user!.id
       const updateData = req.body
 
-      // Handle multiple image uploads
       if (req.files && Array.isArray(req.files)) {
         const images: string[] = []
         for (const file of req.files) {
@@ -861,7 +857,7 @@ export class StoreController {
 
         if (images.length > 0) {
           updateData.images = images
-          updateData.image = images[0] // Set first image as primary
+          updateData.image = images[0]
         }
       }
 
@@ -1194,7 +1190,6 @@ export class StoreController {
         include: { user: true },
       })
 
-      // Send verification notification
       await this.notificationService.notifyCustomer(storeOwner.userId, {
         type: "STORE_OWNER_VERIFIED",
         title: "Store Owner Verified",
@@ -1228,7 +1223,6 @@ export class StoreController {
         include: { user: true },
       })
 
-      // Send rejection notification
       await this.notificationService.notifyCustomer(storeOwner.userId, {
         type: "STORE_OWNER_REJECTED",
         title: "Store Owner Application Rejected",
@@ -1258,7 +1252,6 @@ export class StoreController {
       const userId = req.user!.id
       const { productIds, updateData } = req.body
 
-      // Check store ownership
       const store = await prisma.store.findUnique({
         where: { id: storeId },
         include: { owner: true },
@@ -1306,7 +1299,6 @@ export class StoreController {
     try {
       const userId = req.user!.id
 
-      // Check if user is store owner
       const storeOwnerProfile = await prisma.storeOwnerProfile.findUnique({
         where: { userId },
       })
@@ -1354,6 +1346,346 @@ export class StoreController {
       res.status(500).json({
         success: false,
         message: "Failed to retrieve store statistics",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  // Category Management (Super Admin only)
+  createCategory = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      console.log("[v0] createCategory - req.body:", req.body)
+      console.log("[v0] createCategory - req.body keys:", Object.keys(req.body))
+      console.log("[v0] createCategory - req.file:", req.file)
+      console.log("[v0] createCategory - req.query:", req.query)
+      console.log("[v0] createCategory - req.params:", req.params)
+
+      const name = req.body.name
+      const description = req.body.description
+      const imageFile = req.file
+      const storeTypes = req.body.storeTypes // Array of StoreType enums (already validated and converted)
+
+      console.log("[v0] createCategory - extracted name:", name)
+      console.log("[v0] createCategory - extracted description:", description)
+      console.log("[v0] createCategory - extracted storeTypes:", storeTypes)
+
+      const userId = req.user!.id
+      console.log("[v0] createCategory - userId:", userId)
+
+      if (!name) {
+        console.log("[v0] createCategory - name validation failed")
+        res.status(400).json({
+          success: false,
+          message: "Category name is required",
+        })
+        return
+      }
+
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+      })
+
+      if (!user || user.role !== "SUPER_ADMIN") {
+        res.status(403).json({
+          success: false,
+          message: "Only super admins can create categories",
+        })
+        return
+      }
+
+      const existingCategory = await prisma.category.findUnique({
+        where: { name: name.trim() },
+      })
+
+      if (existingCategory) {
+        res.status(400).json({
+          success: false,
+          message: "Category with this name already exists",
+        })
+        return
+      }
+
+      let imageUrl = null
+      if (imageFile) {
+        imageUrl = await this.fileUploadService.uploadImage(imageFile, "categories")
+      }
+
+      const category = await prisma.category.create({
+        data: {
+          name: name.trim(),
+          description: description?.trim() || null,
+          imageUrl,
+          storeTypes,
+        },
+      })
+
+      res.status(201).json({
+        success: true,
+        message: "Category created successfully",
+        data: category,
+      })
+    } catch (error) {
+      console.log("[v0] createCategory - error occurred:", error)
+      logger.error("Create category error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to create category",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  updateCategory = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { id } = req.params
+      const { name, description, storeTypes } = req.body
+      const userId = req.user!.id
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+      })
+
+      if (!user || user.role !== "SUPER_ADMIN") {
+        return res.status(403).json({
+          success: false,
+          message: "Only super admins can update categories",
+        })
+      }
+
+      const existingCategory = await prisma.category.findUnique({
+        where: { id },
+      })
+
+      if (!existingCategory) {
+        return res.status(404).json({
+          success: false,
+          message: "Category not found",
+        })
+      }
+
+
+      const updateData: any = { name, description }
+      if (storeTypes) updateData.storeTypes = storeTypes
+      if (req.file) {
+        updateData.imageUrl = await this.fileUploadService.uploadImage(req.file, "categories")
+      }
+
+      const category = await prisma.category.update({
+        where: { id },
+        data: updateData,
+      })
+
+      res.json({
+        success: true,
+        message: "Category updated successfully",
+        data: category,
+      })
+    } catch (error) {
+      logger.error("Update category error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to update category",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  deleteCategory = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const categoryId = req.params.categoryId
+      const userId = req.user!.id
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+      })
+
+      if (!user || user.role !== "SUPER_ADMIN") {
+        return res.status(403).json({
+          success: false,
+          message: "Only super admins can delete categories",
+        })
+      }
+
+      const category = await prisma.category.findUnique({
+        where: { id: categoryId },
+        include: {
+          _count: {
+            select: {
+              products: true,
+              subcategories: true,
+            },
+          },
+        },
+      })
+
+      if (!category) {
+        return res.status(404).json({
+          success: false,
+          message: "Category not found",
+        })
+      }
+
+      if (category._count.products > 0 || category._count.subcategories > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot delete category with existing products or subcategories",
+        })
+      }
+
+      await prisma.category.delete({
+        where: { id: categoryId },
+      })
+
+      res.json({
+        success: true,
+        message: "Category deleted successfully",
+      })
+    } catch (error) {
+      logger.error("Delete category error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to delete category",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
+
+  // Admin: Get all products across all stores
+  getAllProducts = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const {
+        page = 1,
+        limit = 20,
+        search,
+        storeId,
+        categoryId,
+        subcategoryId,
+        inStock,
+        sortBy = "createdAt",
+        sortOrder = "desc",
+      } = req.query
+
+      const where: any = {}
+
+      // Filter by store
+      if (storeId && storeId !== "undefined" && storeId !== "") {
+        where.storeId = storeId
+      }
+
+      // Filter by category
+      if (categoryId && categoryId !== "undefined" && categoryId !== "") {
+        where.categoryId = categoryId
+      }
+
+      // Filter by subcategory
+      if (subcategoryId && subcategoryId !== "undefined" && subcategoryId !== "") {
+        where.subcategoryId = subcategoryId
+      }
+
+      // Filter by stock status
+      if (inStock !== undefined) {
+        where.inStock = inStock === "true"
+      }
+
+      // Search in product name or description
+      if (search) {
+        where.OR = [
+          { name: { contains: search as string, mode: "insensitive" } },
+          { description: { contains: search as string, mode: "insensitive" } },
+        ]
+      }
+
+      const skip = (Number(page) - 1) * Number(limit)
+
+      // Build order by
+      const orderBy: any = {}
+      orderBy[sortBy as string] = sortOrder === "asc" ? "asc" : "desc"
+
+      const [products, total] = await Promise.all([
+        prisma.product.findMany({
+          where,
+          include: {
+            store: {
+              select: {
+                id: true,
+                name: true,
+                type: true,
+                isActive: true,
+                location: {
+                  select: {
+                    city: true,
+                    state: true,
+                  },
+                },
+                owner: {
+                  include: {
+                    user: {
+                      select: {
+                        firstName: true,
+                        lastName: true,
+                        email: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            category: {
+              select: {
+                id: true,
+                name: true,
+                description: true,
+              },
+            },
+            subcategory: {
+              select: {
+                id: true,
+                name: true,
+                description: true,
+                category: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+          orderBy,
+          skip,
+          take: Number(limit),
+        }),
+        prisma.product.count({ where }),
+      ])
+
+      res.json({
+        success: true,
+        message: "Products retrieved successfully",
+        data: {
+          products,
+          pagination: {
+            page: Number(page),
+            limit: Number(limit),
+            total,
+            totalPages: Math.ceil(total / Number(limit)),
+          },
+          filters: {
+            search: search as string,
+            storeId: storeId as string,
+            categoryId: categoryId as string,
+            subcategoryId: subcategoryId as string,
+            inStock: inStock === "true",
+            sortBy: sortBy as string,
+            sortOrder: sortOrder as string,
+          },
+        },
+      })
+    } catch (error) {
+      logger.error("Get all products error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve products",
         error: error instanceof Error ? error.message : "Unknown error",
       })
     }

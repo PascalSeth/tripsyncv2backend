@@ -294,6 +294,23 @@ export class TaxiDriverService {
         },
       })
 
+      // Broadcast availability update via WebSocket
+      try {
+        const { io } = await import("../server")
+        await io.broadcastToRole("USER", "taxi_driver_availability_update", {
+          driverId: userId,
+          isAvailable: availabilityData.isAvailable,
+          isOnline: availabilityData.isOnline,
+          location: availabilityData.currentLatitude && availabilityData.currentLongitude ? {
+            latitude: availabilityData.currentLatitude,
+            longitude: availabilityData.currentLongitude
+          } : null,
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to broadcast taxi driver availability update:", error)
+      }
+
       return profile
     } catch (error) {
       logger.error("Update taxi availability error:", error)
@@ -322,6 +339,31 @@ export class TaxiDriverService {
           speed: locationData.speed,
         },
       })
+
+      // Broadcast location update to active customers
+      try {
+        const { io } = await import("../server")
+        const activeBookings = await prisma.booking.findMany({
+          where: {
+            providerId: userId,
+            status: { in: ["DRIVER_ASSIGNED", "DRIVER_EN_ROUTE", "DRIVER_ARRIVED", "IN_PROGRESS"] },
+          },
+        })
+
+        for (const booking of activeBookings) {
+          await io.notifyUser(booking.customerId, "taxi_driver_location_update", {
+            bookingId: booking.id,
+            driverId: userId,
+            latitude: locationData.latitude,
+            longitude: locationData.longitude,
+            heading: locationData.heading,
+            speed: locationData.speed,
+            timestamp: new Date(),
+          })
+        }
+      } catch (error) {
+        logger.warn("Failed to broadcast taxi driver location update:", error)
+      }
     } catch (error) {
       logger.error("Update taxi location error:", error)
       throw error
@@ -431,6 +473,24 @@ export class TaxiDriverService {
         priority: "STANDARD",
       })
 
+      // Send WebSocket notification for real-time updates
+      try {
+        const { io } = await import("../server")
+        await io.notifyUser(booking.customerId, "taxi_booking_accepted", {
+          bookingId,
+          driverId: taxiDriverId,
+          driverName: `${updatedBooking.provider?.firstName} ${updatedBooking.provider?.lastName}`,
+          driverPhone: updatedBooking.provider?.phone,
+          eta,
+          vehicleInfo: taxiDriverProfile.vehicle,
+          taxiLicense: taxiDriverProfile.taxiLicenseNumber,
+          acceptedAt: updatedBooking.acceptedAt,
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to send WebSocket notification for taxi booking acceptance:", error)
+      }
+
       // Start tracking
       await this.startBookingTracking(bookingId, taxiDriverId)
 
@@ -513,6 +573,18 @@ export class TaxiDriverService {
         priority: "URGENT",
       })
 
+      // Send WebSocket notification for real-time updates
+      try {
+        const { io } = await import("../server")
+        await io.notifyUser(booking.customerId, "taxi_driver_arrived", {
+          bookingId,
+          driverId: taxiDriverId,
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to send WebSocket notification for taxi driver arrival:", error)
+      }
+
       return updatedBooking
     } catch (error) {
       logger.error("Taxi driver arrive at pickup error:", error)
@@ -564,6 +636,19 @@ export class TaxiDriverService {
         data: { bookingId },
         priority: "STANDARD",
       })
+
+      // Send WebSocket notification for real-time updates
+      try {
+        const { io } = await import("../server")
+        await io.notifyUser(booking.customerId, "taxi_trip_started", {
+          bookingId,
+          driverId: taxiDriverId,
+          startedAt: updatedBooking.startedAt,
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to send WebSocket notification for taxi trip start:", error)
+      }
 
       return updatedBooking
     } catch (error) {
@@ -699,6 +784,23 @@ export class TaxiDriverService {
         },
         priority: "STANDARD",
       })
+
+      // Send WebSocket notification for real-time updates
+      try {
+        const { io } = await import("../server")
+        await io.notifyUser(booking.customerId, "taxi_trip_completed", {
+          bookingId,
+          driverId: taxiDriverId,
+          finalPrice,
+          distance: completionData.actualDistance,
+          duration: completionData.actualDuration,
+          meterReading: completionData.meterReading,
+          completedAt: updatedBooking.completedAt,
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to send WebSocket notification for taxi trip completion:", error)
+      }
 
       return updatedBooking
     } catch (error) {

@@ -161,7 +161,7 @@ export class AuthController {
       if (!isPasswordValid) {
         return res.status(401).json({
           success: false,
-          message: "Invalid credentials",
+          message: "Invalid PASSWORD",
         })
       }
 
@@ -246,7 +246,8 @@ export class AuthController {
         where: { email },
         include: {
           driverProfile: true,
-          deliveryProfile:true // Include driver profile to check if user is actually a driver
+          taxiDriverProfile: true,
+          deliveryProfile: true // Include all driver profiles to check if user is actually a driver
         },
       })
 
@@ -267,7 +268,9 @@ export class AuthController {
       }
 
       // Additional check: Ensure driver profile exists
-      if (user.role === "DRIVER" && !user.driverProfile || user.role === "DISPATCHER" && !user.deliveryProfile) {
+      if ((user.role === "DRIVER" && !user.driverProfile) ||
+          (user.role === "TAXI_DRIVER" && !user.taxiDriverProfile) ||
+          (user.role === "DISPATCHER" && !user.deliveryProfile)) {
         return res.status(403).json({
           success: false,
           message: "Driver profile not found. Please complete driver onboarding.",
@@ -295,7 +298,11 @@ export class AuthController {
       }
 
       // Check if driver is approved (if you have approval system)
-      if (user.driverProfile && user.driverProfile.verificationStatus !== "APPROVED") {
+      const profile = user.role === "DRIVER" ? user.driverProfile :
+                     user.role === "TAXI_DRIVER" ? user.taxiDriverProfile :
+                     user.role === "DISPATCHER" ? user.deliveryProfile : null;
+
+      if (profile && profile.verificationStatus !== "APPROVED") {
         return res.status(403).json({
           success: false,
           message: "Driver account pending approval",
@@ -344,8 +351,8 @@ export class AuthController {
             subscriptionStatus: user.subscriptionStatus,
             isCommissionCurrent: user.isCommissionCurrent,
             permissions,
-            // Include driver-specific data with full vehicle object and document status
-            driverProfile: {
+            // Include driver-specific data based on role
+            driverProfile: user.role === "DRIVER" ? {
               ...user.driverProfile,
               vehicle: user.driverProfile?.vehicleId
                 ? await prisma.vehicle.findUnique({
@@ -363,7 +370,45 @@ export class AuthController {
                     },
                   })
                 : [],
-            },
+            } : null,
+            taxiDriverProfile: user.role === "TAXI_DRIVER" ? {
+              ...user.taxiDriverProfile,
+              vehicle: user.taxiDriverProfile?.vehicleId
+                ? await prisma.vehicle.findUnique({
+                    where: { id: user.taxiDriverProfile.vehicleId },
+                  })
+                : null,
+              documentStatus: user.taxiDriverProfile
+                ? await prisma.taxiDriverDocument.findMany({
+                    where: { taxiDriverProfileId: user.taxiDriverProfile.id },
+                    select: {
+                      type: true,
+                      status: true,
+                      expiryDate: true,
+                      documentNumber: true,
+                    },
+                  })
+                : [],
+            } : null,
+            deliveryProfile: user.role === "DISPATCHER" ? {
+              ...user.deliveryProfile,
+              vehicle: user.deliveryProfile?.vehicleId
+                ? await prisma.vehicle.findUnique({
+                    where: { id: user.deliveryProfile.vehicleId },
+                  })
+                : null,
+              documentStatus: user.deliveryProfile
+                ? await prisma.deliveryDocument.findMany({
+                    where: { deliveryProfileId: user.deliveryProfile.id },
+                    select: {
+                      type: true,
+                      status: true,
+                      expiryDate: true,
+                      documentNumber: true,
+                    },
+                  })
+                : [],
+            } : null,
           },
           token,
         },

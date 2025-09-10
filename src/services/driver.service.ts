@@ -11,20 +11,41 @@ export class DriverService {
 
   async acceptBooking(driverId: string, bookingId: string) {
     try {
+      console.log(`🎯 DRIVER ACCEPTING BOOKING: ${driverId} -> ${bookingId}`)
+
       // Get driver profile
       const driverProfile = await prisma.driverProfile.findUnique({
         where: { userId: driverId },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              avatar: true,
+            },
+          },
+          vehicle: true,
+        },
       })
 
       if (!driverProfile || !driverProfile.isVerified || !driverProfile.isAvailable) {
         throw new Error("Driver not available or not verified")
       }
 
-      // Get booking
+      // Get booking with customer details
       const booking = await prisma.booking.findUnique({
         where: { id: bookingId },
         include: {
-          customer: true,
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+            },
+          },
           serviceType: true,
         },
       })
@@ -43,12 +64,11 @@ export class DriverService {
         )
 
         if (distance > 15000) {
-          // 15km limit
           throw new Error("Driver too far from pickup location")
         }
       }
 
-      // Update booking
+      // Update booking with driver assignment
       const updatedBooking = await prisma.booking.update({
         where: { id: bookingId },
         data: {
@@ -57,8 +77,23 @@ export class DriverService {
           acceptedAt: new Date(),
         },
         include: {
-          customer: true,
-          provider: true,
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+            },
+          },
+          provider: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              avatar: true,
+            },
+          },
           serviceType: true,
         },
       })
@@ -71,6 +106,30 @@ export class DriverService {
         },
       })
 
+      // Mark all driver notifications for this booking as expired except the accepted one
+      await prisma.driverNotification.updateMany({
+        where: {
+          bookingId,
+          driverId: { not: driverId },
+          status: "SENT",
+        },
+        data: {
+          status: "EXPIRED",
+        },
+      })
+
+      // Mark the accepted driver's notification as read
+      await prisma.driverNotification.updateMany({
+        where: {
+          bookingId,
+          driverId,
+          status: "SENT",
+        },
+        data: {
+          status: "READ",
+        },
+      })
+
       // Calculate ETA
       const eta = await this.calculateETA(
         driverProfile.currentLatitude!,
@@ -79,26 +138,90 @@ export class DriverService {
         booking.pickupLongitude!,
       )
 
-      // Notify customer
+      console.log(`✅ Booking ${bookingId} accepted by driver ${driverId}, ETA: ${eta} minutes`)
+
+      // Notify customer with driver details
       await this.notificationService.notifyCustomer(booking.customerId, {
         type: "BOOKING_ACCEPTED",
-        title: "Driver Assigned",
-        body: `${updatedBooking.provider?.firstName} is on the way. ETA: ${eta} minutes`,
+        title: "Driver Found!",
+        body: `${driverProfile.user.firstName} is on the way. ETA: ${eta} minutes`,
         data: {
           bookingId: booking.id,
-          driverName: `${updatedBooking.provider?.firstName} ${updatedBooking.provider?.lastName}`,
-          driverPhone: updatedBooking.provider?.phone,
+          driver: {
+            id: driverProfile.user.id,
+            name: `${driverProfile.user.firstName} ${driverProfile.user.lastName}`,
+            phone: driverProfile.user.phone,
+            avatar: driverProfile.user.avatar,
+            rating: driverProfile.rating,
+          },
+          vehicle: driverProfile.vehicle
+            ? {
+                make: driverProfile.vehicle.make,
+                model: driverProfile.vehicle.model,
+                color: driverProfile.vehicle.color,
+                licensePlate: driverProfile.vehicle.licensePlate,
+              }
+            : null,
           eta,
+          status: "DRIVER_ASSIGNED",
         },
-        priority: "STANDARD",
+        priority: "URGENT",
       })
+
+      // Send real-time update via WebSocket
+      try {
+        const { io } = await import("../server")
+
+        // Notify customer
+        await io.notifyUser(booking.customerId, "booking_update", {
+          bookingId: booking.id,
+          status: "DRIVER_ASSIGNED",
+          driver: {
+            id: driverProfile.user.id,
+            name: `${driverProfile.user.firstName} ${driverProfile.user.lastName}`,
+            phone: driverProfile.user.phone,
+            avatar: driverProfile.user.avatar,
+            rating: driverProfile.rating,
+          },
+          vehicle: driverProfile.vehicle,
+          eta,
+          timestamp: new Date(),
+        })
+
+        // Notify driver
+        await io.notifyUser(driverId, "booking_accepted", {
+          bookingId: booking.id,
+          customer: {
+            name: `${booking.customer?.firstName} ${booking.customer?.lastName}`,
+            phone: booking.customer?.phone,
+          },
+          pickup: {
+            latitude: booking.pickupLatitude,
+            longitude: booking.pickupLongitude,
+          },
+          dropoff: booking.dropoffLatitude
+            ? {
+                latitude: booking.dropoffLatitude,
+                longitude: booking.dropoffLongitude,
+              }
+            : null,
+          estimatedEarning: booking.providerEarning,
+          timestamp: new Date(),
+        })
+
+        console.log(`📡 Real-time updates sent to customer and driver`)
+      } catch (socketError) {
+        console.error(`❌ WebSocket notification failed:`, socketError)
+      }
 
       // Start tracking
       await this.startBookingTracking(bookingId, driverId)
 
+      console.log(`🎯 BOOKING ACCEPTANCE COMPLETE: ${bookingId}`)
       return updatedBooking
     } catch (error) {
       logger.error("Accept booking error:", error)
+      console.error(`❌ BOOKING ACCEPTANCE FAILED: ${driverId} -> ${bookingId}`, error)
       throw error
     }
   }
@@ -154,6 +277,30 @@ export class DriverService {
         },
       })
 
+      // Notify customer via WebSocket
+      const { io } = await import("../server")
+      await io.notifyUser(booking.customerId, "booking_update", {
+        bookingId: booking.id,
+        status: "DRIVER_ARRIVED",
+        message: "Your driver has arrived at the pickup location.",
+        timestamp: new Date(),
+      })
+      // Notify driver (confirmation that they've marked arrival)
+      await io.notifyUser(driverId, "driver_status_update", {
+        bookingId: booking.id,
+        status: "DRIVER_ARRIVED",
+        message: "You have marked arrival at pickup location.",
+        nextAction: "START_TRIP",
+        timestamp: new Date(),
+      })
+      // Notify driver (optional, but good for confirmation)
+      await io.notifyUser(driverId, "driver_booking_status_update", {
+        bookingId: booking.id,
+        status: "DRIVER_ARRIVED",
+        message: "You have arrived at the pickup location.",
+        timestamp: new Date(),
+      })
+
       // Add tracking update
       await prisma.trackingUpdate.create({
         data: {
@@ -206,6 +353,30 @@ export class DriverService {
         },
       })
 
+      // Notify customer via WebSocket
+      const { io } = await import("../server")
+      await io.notifyUser(booking.customerId, "booking_update", {
+        bookingId: booking.id,
+        status: "IN_PROGRESS",
+        message: "Your trip has started.",
+        timestamp: new Date(),
+      })
+      // Notify driver (confirmation that trip has started)
+      await io.notifyUser(driverId, "driver_status_update", {
+        bookingId: booking.id,
+        status: "TRIP_STARTED",
+        message: "Trip has started successfully.",
+        nextAction: "COMPLETE_TRIP",
+        timestamp: new Date(),
+      })
+      // Notify driver (optional)
+      await io.notifyUser(driverId, "driver_booking_status_update", {
+        bookingId: booking.id,
+        status: "TRIP_STARTED",
+        message: "Trip has started.",
+        timestamp: new Date(),
+      })
+
       // Add tracking update
       await prisma.trackingUpdate.create({
         data: {
@@ -254,6 +425,13 @@ export class DriverService {
         },
         include: {
           customer: true,
+          provider: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
           serviceType: true,
         },
       })
@@ -286,7 +464,7 @@ export class DriverService {
       })
 
       // Update driver availability
-      await prisma.driverProfile.updateMany({
+      const driverProfile = await prisma.driverProfile.updateMany({
         where: { userId: driverId },
         data: {
           isAvailable: true,
@@ -297,15 +475,58 @@ export class DriverService {
         },
       })
 
-      // Create earning record
-      const driverProfile = await prisma.driverProfile.findFirst({
+      const updatedDriverProfile = await prisma.driverProfile.findFirst({
         where: { userId: driverId },
       })
 
-      if (driverProfile) {
+      // Notify customer via WebSocket
+      const { io } = await import("../server")
+      await io.notifyUser(booking.customerId, "booking_update", {
+        bookingId: booking.id,
+        status: "COMPLETED",
+        message: `Your trip has been completed. Total: GH₵${finalPrice}`,
+        finalPrice,
+        distance: completionData.actualDistance,
+        duration: completionData.actualDuration,
+        totalEarnings: updatedDriverProfile?.totalEarnings, // Pass updated earnings
+        totalRides: updatedDriverProfile?.totalRides, // Pass updated rides
+        rating: updatedDriverProfile?.rating, // Pass updated rating
+        timestamp: new Date(),
+      })
+      // Notify driver (trip completion confirmation with earnings)
+      await io.notifyUser(driverId, "driver_status_update", {
+        bookingId: booking.id,
+        status: "TRIP_COMPLETED",
+        message: `Trip completed! You earned GH₵${finalPrice}`,
+        earnings: {
+          tripEarning: providerEarning,
+          totalEarnings: updatedDriverProfile?.totalEarnings,
+          totalRides: updatedDriverProfile?.totalRides,
+        },
+        nextAction: "GO_ONLINE",
+        timestamp: new Date(),
+      })
+      // Notify driver (optional)
+      await io.notifyUser(driverId, "driver_booking_status_update", {
+        bookingId: booking.id,
+        status: "TRIP_COMPLETED",
+        message: "Trip completed successfully.",
+        finalPrice,
+        totalEarnings: updatedDriverProfile?.totalEarnings,
+        totalRides: updatedDriverProfile?.totalRides,
+        rating: updatedDriverProfile?.rating,
+        timestamp: new Date(),
+      })
+
+      // Create earning record
+      const driverProfileRecord = await prisma.driverProfile.findFirst({
+        where: { userId: driverId },
+      })
+
+      if (driverProfileRecord) {
         await prisma.driverEarning.create({
           data: {
-            driverProfileId: driverProfile.id,
+            driverProfileId: driverProfileRecord.id,
             bookingId,
             amount: providerEarning,
             commission,
@@ -348,6 +569,20 @@ export class DriverService {
           finalPrice,
           distance: completionData.actualDistance,
           duration: completionData.actualDuration,
+        },
+        priority: "STANDARD",
+      })
+
+      // Send review request notification for driver rating
+      await this.notificationService.notifyCustomer(booking.customerId, {
+        type: "REVIEW_REQUEST",
+        title: "Rate Your Driver",
+        body: `How was your experience with your driver? Please rate your driver.`,
+        data: {
+          bookingId,
+          driverId: booking.providerId,
+          reviewType: "SERVICE_PROVIDER",
+          promptType: "DRIVER_RATING",
         },
         priority: "STANDARD",
       })

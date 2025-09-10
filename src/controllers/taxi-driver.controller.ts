@@ -2,24 +2,112 @@ import type { Response } from "express"
 import type { AuthenticatedRequest } from "../types"
 import { TaxiDriverService } from "../services/taxi-driver.service"
 import { FileUploadService } from "../services/file-upload.service"
+import { WebhookService } from "../services/webhook.service"
 import logger from "../utils/logger"
 
 export class TaxiDriverController {
   private taxiDriverService = new TaxiDriverService()
   private fileUploadService = new FileUploadService()
+  private webhookService = new WebhookService()
 
   async onboardTaxiDriver(req: AuthenticatedRequest, res: Response) {
     try {
-      const userId = req.user!.id
+      // Handle both authenticated and unauthenticated cases
+      let userId = req.user?.id
+
+      // If no authenticated user, this is a new user signup
+      if (!userId) {
+        console.log("=== NEW TAXI DRIVER SIGNUP ===")
+        console.log("Creating new user for taxi driver onboarding")
+
+        const {
+          email,
+          phone,
+          firstName,
+          lastName,
+          password,
+          dateOfBirth,
+          gender,
+          licenseNumber,
+          licenseExpiry,
+          licenseClass,
+          vehicleInfo,
+          currentLatitude,
+          currentLongitude,
+          preferredServiceZones,
+          acceptsSharedRides = true,
+          acceptsCash = true,
+          maxRideDistance,
+          isAvailableForDayBooking = false,
+          canAcceptInterRegional = false,
+        } = req.body
+
+        // Validate required fields
+        if (!email || !phone || !firstName || !lastName) {
+          return res.status(400).json({
+            success: false,
+            message: "Email, phone, firstName, and lastName are required for new taxi driver registration",
+          })
+        }
+
+        // Check if user already exists
+        const existingUser = await import("../config/database").then(({ default: prisma }) =>
+          prisma.user.findFirst({
+            where: {
+              OR: [{ email }, { phone }],
+            },
+          })
+        )
+
+        if (existingUser) {
+          return res.status(400).json({
+            success: false,
+            message: "User already exists with this email or phone",
+          })
+        }
+
+        // Create new user
+        const prisma = (await import("../config/database")).default
+        const bcrypt = (await import("bcryptjs")).default
+        const referralCode = `TAXI${Date.now().toString().slice(-6)}`
+
+        const newUser = await prisma.user.create({
+          data: {
+            email,
+            phone,
+            firstName,
+            lastName,
+            passwordHash: password ? await bcrypt.hash(password, 12) : null,
+            gender: gender || null,
+            dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+            role: "TAXI_DRIVER",
+            referralCode,
+            isActive: true,
+            isVerified: false,
+            subscriptionStatus: "ACTIVE",
+            subscriptionTier: "BASIC",
+            nextCommissionDue: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            commissionBalance: 0,
+            isCommissionCurrent: true,
+          },
+        })
+
+        userId = newUser.id
+        console.log("✅ New user created for taxi driver:", userId)
+      }
 
       const taxiDriverProfile = await this.taxiDriverService.onboardTaxiDriver(userId, req.body)
 
       res.status(201).json({
         success: true,
-        message: "Taxi driver onboarded successfully",
+        message: userId === req.user?.id
+          ? "Taxi driver profile added to existing user successfully"
+          : "Taxi driver onboarded successfully",
         data: taxiDriverProfile,
       })
     } catch (error: any) {
+      console.log("=== TAXI DRIVER ONBOARDING ERROR ===")
+      console.log("Error details:", error)
       logger.error("Onboard taxi driver error:", error)
       res.status(400).json({
         success: false,
@@ -185,6 +273,17 @@ export class TaxiDriverController {
 
       const profile = await this.taxiDriverService.updateAvailability(userId, req.body)
 
+      // Send webhook notification for availability change
+      try {
+        await this.webhookService.notifyTaxiDriverAvailabilityChange(
+          userId,
+          profile.isAvailable || false,
+          profile.isOnline || false
+        )
+      } catch (webhookError) {
+        logger.warn("Failed to send taxi driver availability webhook:", webhookError)
+      }
+
       res.json({
         success: true,
         message: "Availability updated successfully",
@@ -204,6 +303,16 @@ export class TaxiDriverController {
       const userId = req.user!.id
 
       await this.taxiDriverService.updateLocation(userId, req.body)
+
+      // Send webhook notification for location update
+      try {
+        await this.webhookService.notifyTaxiDriverLocationUpdate(
+          userId,
+          req.body
+        )
+      } catch (webhookError) {
+        logger.warn("Failed to send taxi driver location webhook:", webhookError)
+      }
 
       res.json({
         success: true,
@@ -264,6 +373,92 @@ export class TaxiDriverController {
 
       const booking = await this.taxiDriverService.acceptBooking(userId, bookingId)
 
+      // Emit WebSocket events
+      try {
+        const { io } = await import("../server")
+
+        // Get the booking with driver information
+        const prisma = (await import("../config/database")).default
+        const bookingWithDriver = await prisma.booking.findUnique({
+          where: { id: bookingId },
+          include: {
+            provider: {
+              include: {
+                taxiDriverProfile: {
+                  include: {
+                    vehicle: true,
+                  },
+                },
+              },
+            },
+          },
+        })
+
+        // Emit role-specific booking accepted event to driver
+        await io.notifyUser(userId, "taxi_booking_accepted", {
+          bookingId: bookingId,
+          customer: {
+            name: "Customer Name", // You can get this from booking.customer
+          },
+          message: "Booking accepted successfully",
+          timestamp: new Date(),
+        })
+
+        // Emit booking_update with DRIVER_ASSIGNED to booking room for customer
+        const updateData: any = {
+          bookingId: bookingId,
+          status: "DRIVER_ASSIGNED",
+          message: "Driver has been assigned to your booking",
+          timestamp: new Date(),
+        }
+
+        if (bookingWithDriver?.provider) {
+          const driverProfile = bookingWithDriver.provider.taxiDriverProfile
+          if (driverProfile) {
+            updateData.driver = {
+              id: bookingWithDriver.provider.id,
+              name: `${bookingWithDriver.provider.firstName} ${bookingWithDriver.provider.lastName}`,
+              phone: bookingWithDriver.provider.phone,
+              rating: driverProfile.rating,
+              currentLocation: {
+                latitude: driverProfile.currentLatitude,
+                longitude: driverProfile.currentLongitude,
+              },
+              photoUrl: bookingWithDriver.provider.avatar,
+            }
+            updateData.vehicle = driverProfile.vehicle ? {
+              model: driverProfile.vehicle.model,
+              licensePlate: driverProfile.vehicle.licensePlate,
+            } : null
+            updateData.bookingNumber = bookingWithDriver.bookingNumber
+            updateData.pickupLocation = {
+              address: "Pickup Location",
+              latitude: bookingWithDriver.pickupLatitude,
+              longitude: bookingWithDriver.pickupLongitude,
+            }
+            updateData.dropoffLocation = {
+              address: "Dropoff Location",
+              latitude: bookingWithDriver.dropoffLatitude,
+              longitude: bookingWithDriver.dropoffLongitude,
+            }
+            updateData.estimatedPrice = bookingWithDriver.estimatedPrice
+            updateData.estimatedDuration = bookingWithDriver.estimatedDuration
+          }
+        }
+
+        await io.emitToRoom(`booking:${bookingId}`, "booking_update", updateData)
+      } catch (error) {
+        logger.warn("Failed to emit WebSocket events:", error)
+      }
+
+      // Send webhook notification for booking acceptance
+      try {
+        const driverProfile = await this.taxiDriverService.getProfile(userId)
+        await this.webhookService.notifyTaxiBookingAccepted(bookingId, booking, driverProfile)
+      } catch (webhookError) {
+        logger.warn("Failed to send taxi booking acceptance webhook:", webhookError)
+      }
+
       res.json({
         success: true,
         message: "Booking accepted successfully",
@@ -305,6 +500,42 @@ export class TaxiDriverController {
 
       const booking = await this.taxiDriverService.arriveAtPickup(userId, bookingId)
 
+      // Emit WebSocket events
+      try {
+        const { io } = await import("../server")
+
+        // Emit role-specific event to driver
+        await io.notifyUser(userId, "taxi_driver_arrived", {
+          bookingId: bookingId,
+          message: "You have arrived at the pickup location",
+          timestamp: new Date(),
+        })
+
+        // Emit booking_update to booking room for customer
+        await io.emitToRoom(`booking:${bookingId}`, "booking_update", {
+          bookingId: bookingId,
+          status: "DRIVER_ARRIVED",
+          message: "Driver has arrived at pickup location",
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to emit WebSocket events:", error)
+      }
+
+      // Send webhook notification for arrival
+      try {
+        const driverProfile = await this.taxiDriverService.getProfile(userId)
+        await this.webhookService.notifyTaxiBookingStatusUpdate(
+          bookingId,
+          "DRIVER_ARRIVED",
+          booking,
+          driverProfile,
+          { message: "Driver has arrived at pickup location" }
+        )
+      } catch (webhookError) {
+        logger.warn("Failed to send taxi driver arrival webhook:", webhookError)
+      }
+
       res.json({
         success: true,
         message: "Arrival confirmed successfully",
@@ -326,6 +557,42 @@ export class TaxiDriverController {
 
       const booking = await this.taxiDriverService.startTrip(userId, bookingId)
 
+      // Emit WebSocket events
+      try {
+        const { io } = await import("../server")
+
+        // Emit role-specific event to driver
+        await io.notifyUser(userId, "taxi_trip_started", {
+          bookingId: bookingId,
+          message: "Trip has started successfully",
+          timestamp: new Date(),
+        })
+
+        // Emit booking_update to booking room for customer
+        await io.emitToRoom(`booking:${bookingId}`, "booking_update", {
+          bookingId: bookingId,
+          status: "IN_PROGRESS",
+          message: "Trip has started",
+          timestamp: new Date(),
+        })
+      } catch (error) {
+        logger.warn("Failed to emit WebSocket events:", error)
+      }
+
+      // Send webhook notification for trip start
+      try {
+        const driverProfile = await this.taxiDriverService.getProfile(userId)
+        await this.webhookService.notifyTaxiBookingStatusUpdate(
+          bookingId,
+          "TRIP_STARTED",
+          booking,
+          driverProfile,
+          { message: "Trip has started successfully" }
+        )
+      } catch (webhookError) {
+        logger.warn("Failed to send taxi trip start webhook:", webhookError)
+      }
+
       res.json({
         success: true,
         message: "Trip started successfully",
@@ -346,6 +613,22 @@ export class TaxiDriverController {
       const bookingId = req.params.id
 
       const booking = await this.taxiDriverService.completeTrip(userId, bookingId, req.body)
+
+      // Send webhook notification for trip completion
+      try {
+        const driverProfile = await this.taxiDriverService.getProfile(userId)
+        await this.webhookService.notifyTaxiBookingStatusUpdate(
+          bookingId,
+          "TRIP_COMPLETED",
+          booking,
+          driverProfile,
+          {
+            message: "Trip completed successfully"
+          }
+        )
+      } catch (webhookError) {
+        logger.warn("Failed to send taxi trip completion webhook:", webhookError)
+      }
 
       res.json({
         success: true,

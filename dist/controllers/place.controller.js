@@ -1,0 +1,924 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.PlaceController = void 0;
+const database_1 = __importDefault(require("../config/database"));
+const place_service_1 = require("../services/place.service");
+const location_service_1 = require("../services/location.service");
+const file_upload_service_1 = require("../services/file-upload.service");
+const notification_service_1 = require("../services/notification.service");
+const logger_1 = __importDefault(require("../utils/logger"));
+class PlaceController {
+    constructor() {
+        this.placeService = new place_service_1.PlaceService();
+        this.locationService = new location_service_1.LocationService();
+        this.fileUploadService = new file_upload_service_1.FileUploadService();
+        this.notificationService = new notification_service_1.NotificationService();
+        this.createPlace = async (req, res) => {
+            try {
+                const userId = req.user?.id;
+                const { name, description, categoryId, latitude, longitude, address, contactInfo, websiteUrl, openingHours, priceLevel, tags, imageUrl, } = req.body;
+                // Check if user can create places
+                if (!userId) {
+                    return res.status(401).json({
+                        success: false,
+                        message: "Authentication required to create places",
+                    });
+                }
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                    select: { role: true },
+                });
+                const canCreatePlace = ["SUPER_ADMIN", "CITY_ADMIN", "PLACE_OWNER"].includes(user?.role || "");
+                if (!canCreatePlace) {
+                    return res.status(403).json({
+                        success: false,
+                        message: "Insufficient permissions to create places",
+                    });
+                }
+                // Create location first
+                const location = await database_1.default.location.create({
+                    data: {
+                        latitude,
+                        longitude,
+                        address,
+                        city: "Unknown", // You might want to geocode this
+                        country: "Nigeria",
+                    },
+                });
+                // Create place
+                const place = await database_1.default.place.create({
+                    data: {
+                        name,
+                        description,
+                        categoryId,
+                        locationId: location.id,
+                        ownerId: user?.role === "PLACE_OWNER" ? userId : null,
+                        contactInfo,
+                        websiteUrl,
+                        openingHours,
+                        priceLevel: priceLevel,
+                        tags,
+                        imageUrl,
+                        isActive: true,
+                        isApproved: user?.role === "SUPER_ADMIN", // Auto-approve for super admin
+                    },
+                    include: {
+                        category: true,
+                        location: true,
+                    },
+                });
+                // Send notification for approval if not auto-approved
+                if (!place.isApproved) {
+                    await this.notificationService.notifyAdmins({
+                        type: "PLACE_APPROVAL_REQUIRED",
+                        title: "New Place Requires Approval",
+                        body: `${name} has been submitted for approval`,
+                        data: { placeId: place.id },
+                    });
+                }
+                res.status(201).json({
+                    success: true,
+                    message: "Place created successfully",
+                    data: place,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Create place error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to create place",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.getPlaces = async (req, res) => {
+            try {
+                const { page = 1, limit = 20, search, categoryId, priceLevel, latitude, longitude, radius = 10000, sortBy = "name", } = req.query;
+                const places = await this.placeService.getPlaces({
+                    page: Number(page),
+                    limit: Number(limit),
+                    search: search,
+                    categoryId: categoryId,
+                    priceLevel: priceLevel,
+                    latitude: latitude ? Number(latitude) : undefined,
+                    longitude: longitude ? Number(longitude) : undefined,
+                    radius: Number(radius),
+                    sortBy: sortBy,
+                    includeVotes: true,
+                });
+                res.json({
+                    success: true,
+                    message: "Places retrieved successfully",
+                    data: places,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get places error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve places",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.getPlaceById = async (req, res) => {
+            try {
+                const placeId = req.params.id;
+                const place = await this.placeService.getPlaceById(placeId, req.user?.id);
+                if (!place) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "Place not found",
+                    });
+                }
+                res.json({
+                    success: true,
+                    message: "Place retrieved successfully",
+                    data: place,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get place by ID error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve place",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.getPlacesByCategory = async (req, res) => {
+            try {
+                const categoryId = req.params.categoryId;
+                const { page = 1, limit = 20, latitude, longitude, radius = 10000 } = req.query;
+                const places = await this.placeService.getPlacesByCategory(categoryId, {
+                    page: Number(page),
+                    limit: Number(limit),
+                    latitude: latitude ? Number(latitude) : undefined,
+                    longitude: longitude ? Number(longitude) : undefined,
+                    radius: Number(radius),
+                });
+                res.json({
+                    success: true,
+                    message: "Places retrieved successfully",
+                    data: places,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get places by category error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve places",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.getNearbyPlaces = async (req, res) => {
+            try {
+                const { latitude, longitude, radius = 5000, limit = 20, categoryId } = req.query;
+                if (!latitude || !longitude) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "Latitude and longitude are required",
+                    });
+                }
+                const places = await this.placeService.getNearbyPlaces({
+                    latitude: Number(latitude),
+                    longitude: Number(longitude),
+                    radius: Number(radius),
+                    limit: Number(limit),
+                    categoryId: categoryId,
+                });
+                res.json({
+                    success: true,
+                    message: "Nearby places retrieved successfully",
+                    data: places,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get nearby places error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve nearby places",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.submitAnonymousVote = async (req, res) => {
+            try {
+                const { placeId, username, gender, isLiked, suggestedCategoryId } = req.body;
+                // Create or get anonymous user
+                const sessionId = `anon_${Date.now()}_${Math.random()}`;
+                let anonymousUser = await database_1.default.anonymousUser.findUnique({
+                    where: { sessionId },
+                });
+                if (!anonymousUser) {
+                    anonymousUser = await database_1.default.anonymousUser.create({
+                        data: {
+                            name: username,
+                            gender: gender,
+                            sessionId,
+                        },
+                    });
+                }
+                // Check if place exists
+                const place = await database_1.default.place.findUnique({
+                    where: { id: placeId },
+                });
+                if (!place) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "Place not found",
+                    });
+                }
+                // Create or update survey
+                let survey = await database_1.default.survey.findFirst({
+                    where: {
+                        anonymousUserId: anonymousUser.id,
+                        status: "IN_PROGRESS",
+                    },
+                });
+                if (!survey) {
+                    survey = await database_1.default.survey.create({
+                        data: {
+                            anonymousUserId: anonymousUser.id,
+                            status: "IN_PROGRESS",
+                        },
+                    });
+                }
+                // Check if user already voted for this place
+                const existingVote = await database_1.default.placeVote.findFirst({
+                    where: {
+                        surveyId: survey.id,
+                        placeId,
+                        anonymousUserId: anonymousUser.id,
+                    },
+                });
+                if (existingVote) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "You have already voted for this place",
+                    });
+                }
+                // Create vote
+                const vote = await database_1.default.placeVote.create({
+                    data: {
+                        surveyId: survey.id,
+                        placeId,
+                        isLiked,
+                        anonymousUserId: anonymousUser.id,
+                    },
+                });
+                // Create category suggestion if provided
+                if (suggestedCategoryId && suggestedCategoryId !== place.categoryId) {
+                    await database_1.default.placeCategorySuggestion.create({
+                        data: {
+                            placeId,
+                            suggestedCategoryId,
+                            anonymousUserId: anonymousUser.id,
+                            reason: "User suggestion",
+                        },
+                    });
+                }
+                res.status(201).json({
+                    success: true,
+                    message: "Vote submitted successfully",
+                    data: {
+                        vote,
+                        anonymousUserId: anonymousUser.id,
+                    },
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Submit anonymous vote error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to submit vote",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.submitUserVote = async (req, res) => {
+            try {
+                const userId = req.user?.id;
+                const { placeId, isLiked, suggestedCategoryId } = req.body;
+                if (!userId) {
+                    return res.status(401).json({
+                        success: false,
+                        message: "Authentication required",
+                    });
+                }
+                // Check if place exists
+                const place = await database_1.default.place.findUnique({
+                    where: { id: placeId },
+                });
+                if (!place) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "Place not found",
+                    });
+                }
+                // Create or update survey
+                let survey = await database_1.default.survey.findFirst({
+                    where: {
+                        userId,
+                        status: "IN_PROGRESS",
+                    },
+                });
+                if (!survey) {
+                    survey = await database_1.default.survey.create({
+                        data: {
+                            userId,
+                            status: "IN_PROGRESS",
+                        },
+                    });
+                }
+                // Check if user already voted for this place
+                const existingVote = await database_1.default.placeVote.findFirst({
+                    where: {
+                        surveyId: survey.id,
+                        placeId,
+                        userId,
+                    },
+                });
+                if (existingVote) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "You have already voted for this place",
+                    });
+                }
+                // Create vote
+                const vote = await database_1.default.placeVote.create({
+                    data: {
+                        surveyId: survey.id,
+                        placeId,
+                        isLiked,
+                        userId,
+                    },
+                });
+                // Create category suggestion if provided
+                if (suggestedCategoryId && suggestedCategoryId !== place.categoryId) {
+                    await database_1.default.placeCategorySuggestion.create({
+                        data: {
+                            placeId,
+                            suggestedCategoryId,
+                            userId,
+                            reason: "User suggestion",
+                        },
+                    });
+                }
+                res.status(201).json({
+                    success: true,
+                    message: "Vote submitted successfully",
+                    data: vote,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Submit user vote error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to submit vote",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.getPlaceVotes = async (req, res) => {
+            try {
+                const placeId = req.params.id;
+                const votes = await this.placeService.getPlaceVotes(placeId);
+                res.json({
+                    success: true,
+                    message: "Place votes retrieved successfully",
+                    data: votes,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get place votes error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve place votes",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.getCategorySuggestions = async (req, res) => {
+            try {
+                const placeId = req.params.id;
+                const suggestions = await this.placeService.getCategorySuggestions(placeId);
+                res.json({
+                    success: true,
+                    message: "Category suggestions retrieved successfully",
+                    data: suggestions,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get category suggestions error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve category suggestions",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.getUserVotes = async (req, res) => {
+            try {
+                const userId = req.user?.id;
+                if (!userId) {
+                    return res.status(401).json({
+                        success: false,
+                        message: "Authentication required",
+                    });
+                }
+                const votes = await database_1.default.placeVote.findMany({
+                    where: { userId },
+                    include: {
+                        place: {
+                            include: {
+                                category: true,
+                                location: true,
+                            },
+                        },
+                    },
+                    orderBy: { createdAt: "desc" },
+                });
+                res.json({
+                    success: true,
+                    message: "User votes retrieved successfully",
+                    data: votes,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get user votes error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve user votes",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.updatePlace = async (req, res) => {
+            try {
+                const placeId = req.params.id;
+                const userId = req.user?.id;
+                const updateData = req.body;
+                if (!userId) {
+                    return res.status(401).json({
+                        success: false,
+                        message: "Authentication required",
+                    });
+                }
+                // Check if user can update this place
+                const place = await database_1.default.place.findUnique({
+                    where: { id: placeId },
+                });
+                if (!place) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "Place not found",
+                    });
+                }
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                    select: { role: true },
+                });
+                const canUpdate = ["SUPER_ADMIN", "CITY_ADMIN"].includes(user?.role || "") || place.ownerId === userId;
+                if (!canUpdate) {
+                    return res.status(403).json({
+                        success: false,
+                        message: "Insufficient permissions to update this place",
+                    });
+                }
+                // Update place
+                const updatedPlace = await database_1.default.place.update({
+                    where: { id: placeId },
+                    data: {
+                        ...updateData,
+                        isApproved: user?.role === "SUPER_ADMIN" ? true : place.isApproved,
+                    },
+                    include: {
+                        category: true,
+                        location: true,
+                    },
+                });
+                res.json({
+                    success: true,
+                    message: "Place updated successfully",
+                    data: updatedPlace,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Update place error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to update place",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.deletePlace = async (req, res) => {
+            try {
+                const placeId = req.params.id;
+                const userId = req.user?.id;
+                if (!userId) {
+                    return res.status(401).json({
+                        success: false,
+                        message: "Authentication required",
+                    });
+                }
+                // Check if user can delete this place
+                const place = await database_1.default.place.findUnique({
+                    where: { id: placeId },
+                });
+                if (!place) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "Place not found",
+                    });
+                }
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                    select: { role: true },
+                });
+                const canDelete = ["SUPER_ADMIN", "CITY_ADMIN"].includes(user?.role || "") || place.ownerId === userId;
+                if (!canDelete) {
+                    return res.status(403).json({
+                        success: false,
+                        message: "Insufficient permissions to delete this place",
+                    });
+                }
+                // Soft delete
+                await database_1.default.place.update({
+                    where: { id: placeId },
+                    data: { isActive: false },
+                });
+                res.json({
+                    success: true,
+                    message: "Place deleted successfully",
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Delete place error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to delete place",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.uploadPhoto = async (req, res) => {
+            try {
+                const placeId = req.params.id;
+                const userId = req.user?.id;
+                const { caption } = req.body;
+                const file = req.file;
+                if (!userId) {
+                    return res.status(401).json({
+                        success: false,
+                        message: "Authentication required",
+                    });
+                }
+                if (!file) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "Photo file is required",
+                    });
+                }
+                // Check if place exists
+                const place = await database_1.default.place.findUnique({
+                    where: { id: placeId },
+                });
+                if (!place) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "Place not found",
+                    });
+                }
+                // Upload photo
+                const photoUrl = await this.fileUploadService.uploadImage(file, `places/${placeId}`, {
+                    width: 800,
+                    height: 600,
+                });
+                // Create photo record
+                const photo = await database_1.default.placePhoto.create({
+                    data: {
+                        placeId,
+                        photoUrl,
+                        caption,
+                        uploadedBy: userId,
+                        isApproved: false,
+                    },
+                });
+                res.status(201).json({
+                    success: true,
+                    message: "Photo uploaded successfully",
+                    data: photo,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Upload photo error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to upload photo",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.deletePhoto = async (req, res) => {
+            try {
+                const photoId = req.params.photoId;
+                const userId = req.user?.id;
+                if (!userId) {
+                    return res.status(401).json({
+                        success: false,
+                        message: "Authentication required",
+                    });
+                }
+                const photo = await database_1.default.placePhoto.findUnique({
+                    where: { id: photoId },
+                    include: { place: true },
+                });
+                if (!photo) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "Photo not found",
+                    });
+                }
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                    select: { role: true },
+                });
+                const canDelete = ["SUPER_ADMIN", "CITY_ADMIN"].includes(user?.role || "") ||
+                    photo.uploadedBy === userId ||
+                    photo.place.ownerId === userId;
+                if (!canDelete) {
+                    return res.status(403).json({
+                        success: false,
+                        message: "Insufficient permissions to delete this photo",
+                    });
+                }
+                await database_1.default.placePhoto.delete({
+                    where: { id: photoId },
+                });
+                res.json({
+                    success: true,
+                    message: "Photo deleted successfully",
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Delete photo error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to delete photo",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        // Admin functions
+        this.getAllPlaces = async (req, res) => {
+            try {
+                const { page = 1, limit = 20, status, categoryId, ownerId } = req.query;
+                const where = {};
+                if (status)
+                    where.isApproved = status === "approved";
+                if (categoryId)
+                    where.categoryId = categoryId;
+                if (ownerId)
+                    where.ownerId = ownerId;
+                const places = await database_1.default.place.findMany({
+                    where,
+                    include: {
+                        category: true,
+                        location: true,
+                        _count: {
+                            select: {
+                                placeVotes: true,
+                                placePhotos: true,
+                            },
+                        },
+                    },
+                    skip: (Number(page) - 1) * Number(limit),
+                    take: Number(limit),
+                    orderBy: { createdAt: "desc" },
+                });
+                const total = await database_1.default.place.count({ where });
+                res.json({
+                    success: true,
+                    message: "Places retrieved successfully",
+                    data: places,
+                    pagination: {
+                        page: Number(page),
+                        limit: Number(limit),
+                        total,
+                        totalPages: Math.ceil(total / Number(limit)),
+                    },
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get all places error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve places",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.approvePlace = async (req, res) => {
+            try {
+                const placeId = req.params.id;
+                const place = await database_1.default.place.update({
+                    where: { id: placeId },
+                    data: { isApproved: true },
+                });
+                // Notify place owner
+                if (place.ownerId) {
+                    await this.notificationService.notifyCustomer(place.ownerId, {
+                        type: "PLACE_APPROVED",
+                        title: "Place Approved",
+                        body: `Your place "${place.name}" has been approved and is now live`,
+                        data: { placeId: place.id },
+                        priority: "STANDARD",
+                    });
+                }
+                res.json({
+                    success: true,
+                    message: "Place approved successfully",
+                    data: place,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Approve place error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to approve place",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.rejectPlace = async (req, res) => {
+            try {
+                const placeId = req.params.id;
+                const { reason } = req.body;
+                const place = await database_1.default.place.update({
+                    where: { id: placeId },
+                    data: {
+                        isApproved: false,
+                        isActive: false,
+                    },
+                });
+                // Notify place owner
+                if (place.ownerId) {
+                    await this.notificationService.notifyCustomer(place.ownerId, {
+                        type: "PLACE_REJECTED",
+                        title: "Place Rejected",
+                        body: `Your place "${place.name}" has been rejected. Reason: ${reason}`,
+                        data: { placeId: place.id, reason },
+                        priority: "STANDARD",
+                    });
+                }
+                res.json({
+                    success: true,
+                    message: "Place rejected successfully",
+                    data: place,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Reject place error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to reject place",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.getPendingPlaces = async (req, res) => {
+            try {
+                const { page = 1, limit = 20 } = req.query;
+                const places = await database_1.default.place.findMany({
+                    where: {
+                        isApproved: false,
+                        isActive: true,
+                    },
+                    include: {
+                        category: true,
+                        location: true,
+                    },
+                    skip: (Number(page) - 1) * Number(limit),
+                    take: Number(limit),
+                    orderBy: { createdAt: "asc" },
+                });
+                const total = await database_1.default.place.count({
+                    where: {
+                        isApproved: false,
+                        isActive: true,
+                    },
+                });
+                res.json({
+                    success: true,
+                    message: "Pending places retrieved successfully",
+                    data: places,
+                    pagination: {
+                        page: Number(page),
+                        limit: Number(limit),
+                        total,
+                        totalPages: Math.ceil(total / Number(limit)),
+                    },
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get pending places error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve pending places",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        // Categories
+        this.getCategories = async (req, res) => {
+            try {
+                const categories = await database_1.default.placeCategory.findMany({
+                    where: { isActive: true },
+                    include: {
+                        _count: {
+                            select: {
+                                places: {
+                                    where: {
+                                        isActive: true,
+                                        isApproved: true,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    orderBy: { sortOrder: "asc" },
+                });
+                res.json({
+                    success: true,
+                    message: "Categories retrieved successfully",
+                    data: categories,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get categories error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve categories",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.createCategory = async (req, res) => {
+            try {
+                const { name, description, icon, sortOrder } = req.body;
+                const category = await database_1.default.placeCategory.create({
+                    data: {
+                        name,
+                        description,
+                        icon,
+                        sortOrder: sortOrder || 0,
+                        isActive: true,
+                    },
+                });
+                res.status(201).json({
+                    success: true,
+                    message: "Category created successfully",
+                    data: category,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Create category error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to create category",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.updateCategory = async (req, res) => {
+            try {
+                const categoryId = req.params.id;
+                const updateData = req.body;
+                const category = await database_1.default.placeCategory.update({
+                    where: { id: categoryId },
+                    data: updateData,
+                });
+                res.json({
+                    success: true,
+                    message: "Category updated successfully",
+                    data: category,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Update category error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to update category",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+    }
+}
+exports.PlaceController = PlaceController;

@@ -19,6 +19,59 @@ export class LocationService {
   }
 
   /**
+   * Calculate accurate driving distance using Google Maps Distance Matrix API
+   */
+  async calculateDrivingDistance(
+    fromLat: number,
+    fromLng: number,
+    toLat: number,
+    toLng: number
+  ): Promise<number> {
+    try {
+      const apiKey = process.env.GOOGLE_MAPS_API_KEY
+      if (!apiKey) {
+        logger.warn("Google Maps API key not configured, falling back to Haversine distance")
+        return this.calculateDistance(fromLat, fromLng, toLat, toLng)
+      }
+
+      const origins = `${fromLat},${fromLng}`
+      const destinations = `${toLat},${toLng}`
+      const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${origins}&destinations=${destinations}&mode=driving&units=metric&key=${apiKey}`
+
+      logger.info(`Calculating driving distance from (${fromLat}, ${fromLng}) to (${toLat}, ${toLng})`)
+
+      const response = await fetch(url)
+      const data = await response.json()
+
+      if (data.status !== "OK") {
+        logger.warn(`Google Maps API error: ${data.status}, falling back to Haversine distance`)
+        return this.calculateDistance(fromLat, fromLng, toLat, toLng)
+      }
+
+      if (!data.rows || !data.rows[0] || !data.rows[0].elements || !data.rows[0].elements[0]) {
+        logger.warn("Invalid Google Maps response structure, falling back to Haversine distance")
+        return this.calculateDistance(fromLat, fromLng, toLat, toLng)
+      }
+
+      const element = data.rows[0].elements[0]
+
+      if (element.status !== "OK") {
+        logger.warn(`Google Maps element status: ${element.status}, falling back to Haversine distance`)
+        return this.calculateDistance(fromLat, fromLng, toLat, toLng)
+      }
+
+      const distanceInMeters = element.distance.value
+      logger.info(`Google Maps driving distance: ${distanceInMeters} meters`)
+
+      return distanceInMeters
+    } catch (error) {
+      logger.error("Google Maps distance calculation error:", error)
+      logger.warn("Falling back to Haversine distance calculation")
+      return this.calculateDistance(fromLat, fromLng, toLat, toLng)
+    }
+  }
+
+  /**
    * Calculate bearing between two coordinates
    */
   calculateBearing(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -163,17 +216,146 @@ export class LocationService {
   }
 
   /**
-   * Reverse geocode coordinates to address (placeholder)
+   * Reverse geocode coordinates to address with detailed information
    */
-  async reverseGeocode(lat: number, lng: number): Promise<string | null> {
+  async reverseGeocode(lat: number, lng: number): Promise<{
+    address: string
+    city: string
+    state?: string
+    country: string
+    postalCode?: string
+    formattedAddress: string
+  } | null> {
     try {
-      // In production, integrate with Google Maps Geocoding API or similar
       logger.info(`Reverse geocoding: ${lat}, ${lng}`)
 
-      // Placeholder implementation
-      return `Location at ${lat.toFixed(6)}, ${lng.toFixed(6)}`
+      // Try Google Maps API first (if configured)
+      const googleResult = await this.reverseGeocodeGoogle(lat, lng)
+      if (googleResult) {
+        return googleResult
+      }
+
+      // Fallback to OpenStreetMap Nominatim API
+      const nominatimResult = await this.reverseGeocodeNominatim(lat, lng)
+      if (nominatimResult) {
+        return nominatimResult
+      }
+
+      // Final fallback
+      return {
+        address: `Location at ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+        city: "Unknown",
+        country: "Unknown",
+        formattedAddress: `Location at ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+      }
     } catch (error) {
       logger.error("Reverse geocode error:", error)
+      return null
+    }
+  }
+
+  /**
+   * Reverse geocode using Google Maps API
+   */
+  private async reverseGeocodeGoogle(lat: number, lng: number): Promise<any> {
+    try {
+      const apiKey = process.env.GOOGLE_MAPS_API_KEY
+      if (!apiKey) {
+        return null
+      }
+
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${apiKey}`
+
+      const response = await fetch(url)
+      const data = await response.json()
+
+      if (data.status !== "OK" || !data.results || data.results.length === 0) {
+        return null
+      }
+
+      const result = data.results[0]
+      const addressComponents = result.address_components
+
+      let city = ""
+      let state = ""
+      let country = ""
+      let postalCode = ""
+
+      // Extract address components
+      for (const component of addressComponents) {
+        if (component.types.includes("locality")) {
+          city = component.long_name
+        } else if (component.types.includes("administrative_area_level_1")) {
+          state = component.long_name
+        } else if (component.types.includes("country")) {
+          country = component.long_name
+        } else if (component.types.includes("postal_code")) {
+          postalCode = component.long_name
+        }
+      }
+
+      return {
+        address: result.formatted_address,
+        city: city || "Unknown",
+        state,
+        country: country || "Unknown",
+        postalCode,
+        formattedAddress: result.formatted_address,
+      }
+    } catch (error) {
+      logger.error("Google Maps reverse geocode error:", error)
+      return null
+    }
+  }
+
+  /**
+   * Reverse geocode using OpenStreetMap Nominatim API
+   */
+  private async reverseGeocodeNominatim(lat: number, lng: number): Promise<any> {
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1`
+
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'TripSync-Backend/1.0',
+        },
+      })
+
+      const data = await response.json()
+
+      if (!data || data.error) {
+        return null
+      }
+
+      const address = data.address || {}
+      const city = address.city || address.town || address.village || address.hamlet || "Unknown"
+      const state = address.state || address.region || ""
+      const country = address.country || "Unknown"
+      const postalCode = address.postcode || ""
+
+      return {
+        address: data.display_name || `Location at ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+        city,
+        state,
+        country,
+        postalCode,
+        formattedAddress: data.display_name || `Location at ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+      }
+    } catch (error) {
+      logger.error("Nominatim reverse geocode error:", error)
+      return null
+    }
+  }
+
+  /**
+   * Legacy method for backward compatibility
+   */
+  async reverseGeocodeToString(lat: number, lng: number): Promise<string | null> {
+    try {
+      const result = await this.reverseGeocode(lat, lng)
+      return result ? result.formattedAddress : null
+    } catch (error) {
+      logger.error("Reverse geocode to string error:", error)
       return null
     }
   }

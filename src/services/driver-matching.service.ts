@@ -266,6 +266,8 @@ export class DriverMatchingService {
             select: {
               firstName: true,
               lastName: true,
+              phone: true,
+              avatar: true,
             },
           },
         },
@@ -348,7 +350,7 @@ export class DriverMatchingService {
       setTimeout(async () => {
         console.log(`⏰ Auto-reject timer triggered for booking: ${bookingId}`)
         await this.handleBookingTimeout(bookingId)
-      }, 60000) // 60 seconds
+      }, 30000) // 60 seconds
 
       console.log(`📢 DRIVER NOTIFICATION COMPLETE\n`)
       return { notifiedDrivers: notificationsSent }
@@ -524,10 +526,50 @@ export class DriverMatchingService {
         })
       }
 
-      // Set auto-reject timer for 60 seconds
+      // After sending notifications to drivers, add this timeout logic
       setTimeout(async () => {
-        await this.handleBookingTimeout(bookingId)
-      }, 60000)
+        console.log(`⏰ Checking booking ${bookingId} acceptance status after 60 seconds`)
+
+        const booking = await prisma.booking.findUnique({
+          where: { id: bookingId },
+        })
+
+        if (booking && booking.status === "PENDING") {
+          console.log(`📋 Booking ${bookingId} still pending, expanding search radius`)
+
+          // Expand search radius and try again
+          const expandedDrivers = await this.findNearbyDrivers({
+            latitude: booking.pickupLatitude!,
+            longitude: booking.pickupLongitude!,
+            radius: 25000, // Expand to 25km
+            maxDrivers: 10,
+          })
+
+          if (expandedDrivers.length > 0) {
+            const driverIds = expandedDrivers.map((d) => d.driverId)
+            await this.notifyDriversAboutBooking(bookingId, driverIds, booking)
+          } else {
+            // No drivers available, cancel booking
+            await prisma.booking.update({
+              where: { id: bookingId },
+              data: {
+                status: "NO_DRIVER_AVAILABLE",
+                cancelledAt: new Date(),
+                cancellationReason: "No drivers available in the area",
+              },
+            })
+
+            // Notify customer
+            await this.notificationService.notifyCustomer(booking.customerId, {
+              type: "BOOKING_CANCELLED",
+              title: "No Drivers Available",
+              body: "Sorry, no drivers are available in your area at the moment. Please try again later.",
+              data: { bookingId },
+              priority: "URGENT",
+            })
+          }
+        }
+      }, 60000) // 60 seconds timeout
 
       console.log(`🎯 Closest driver selected: ${availableDrivers[0].driverName}`)
       return availableDrivers[0]

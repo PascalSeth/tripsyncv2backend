@@ -37,6 +37,9 @@ router.put(
 // Get system metrics
 router.get("/metrics", adminController.getSystemMetrics)
 
+// Get users by type with filtering and pagination
+router.get("/users", adminController.getUsersByType)
+
 // Get pending verifications
 router.get("/verifications/pending", adminController.getPendingVerifications)
 
