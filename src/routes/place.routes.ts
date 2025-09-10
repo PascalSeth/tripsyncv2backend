@@ -75,5 +75,10 @@ router.put(
   validateRequest(placeValidation.updateCategory),
   placeController.updateCategory,
 )
+router.delete(
+  "/categories/:id",
+  rbacMiddleware(["SUPER_ADMIN"]),
+  placeController.deleteCategory,
+)
 
 export default router

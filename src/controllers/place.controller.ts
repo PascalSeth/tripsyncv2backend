@@ -1076,4 +1076,75 @@ export class PlaceController {
       })
     }
   }
+
+  deleteCategory = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const categoryId = req.params.id
+      const userId = req.user?.id
+
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: "Authentication required",
+        })
+      }
+
+      // Check if user is SUPER_ADMIN
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { role: true },
+      })
+
+      if (!user || user.role !== "SUPER_ADMIN") {
+        return res.status(403).json({
+          success: false,
+          message: "Only super admins can delete categories",
+        })
+      }
+
+      // Check if category exists and get place count
+      const category = await prisma.placeCategory.findUnique({
+        where: { id: categoryId },
+        include: {
+          _count: {
+            select: {
+              places: true,
+            },
+          },
+        },
+      })
+
+      if (!category) {
+        return res.status(404).json({
+          success: false,
+          message: "Category not found",
+        })
+      }
+
+      // Check if category has associated places
+      if (category._count.places > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot delete category with existing places. Please reassign or delete all places in this category first.",
+        })
+      }
+
+      // Perform hard delete
+      await prisma.placeCategory.delete({
+        where: { id: categoryId },
+      })
+
+      res.json({
+        success: true,
+        message: "Category permanently deleted successfully",
+      })
+    } catch (error) {
+      logger.error("Delete category error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to delete category",
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
+  }
 }
