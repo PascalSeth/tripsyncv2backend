@@ -210,16 +210,52 @@ class StoreController {
                     const imageUrl = await this.fileUploadService.uploadImage(req.file, "stores");
                     storeData.image = imageUrl;
                 }
-                const storeOwnerProfile = await database_1.default.storeOwnerProfile.findUnique({
-                    where: { userId },
+                // Get user details to check role
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
                 });
-                if (!storeOwnerProfile || storeOwnerProfile.verificationStatus !== "APPROVED") {
-                    return res.status(403).json({
+                if (!user) {
+                    return res.status(404).json({
                         success: false,
-                        message: "Store owner profile not found or not verified",
+                        message: "User not found",
                     });
                 }
-                const store = await this.storeService.createStore(storeOwnerProfile.id, storeData);
+                let storeOwnerProfileId;
+                if (user.role === "SUPER_ADMIN") {
+                    // Super admin can create stores without store owner profile requirements
+                    let storeOwnerProfile = await database_1.default.storeOwnerProfile.findUnique({
+                        where: { userId },
+                    });
+                    if (!storeOwnerProfile) {
+                        // Create store owner profile for super admin if it doesn't exist
+                        storeOwnerProfile = await database_1.default.storeOwnerProfile.create({
+                            data: {
+                                userId,
+                                businessLicense: "SUPER_ADMIN_AUTO_GENERATED",
+                                taxId: null,
+                                businessType: "OTHER",
+                                verificationStatus: "APPROVED",
+                                monthlyCommissionDue: 0,
+                                commissionStatus: "CURRENT",
+                            },
+                        });
+                    }
+                    storeOwnerProfileId = storeOwnerProfile.id;
+                }
+                else {
+                    // Regular store owner flow
+                    const storeOwnerProfile = await database_1.default.storeOwnerProfile.findUnique({
+                        where: { userId },
+                    });
+                    if (!storeOwnerProfile || storeOwnerProfile.verificationStatus !== "APPROVED") {
+                        return res.status(403).json({
+                            success: false,
+                            message: "Store owner profile not found or not verified",
+                        });
+                    }
+                    storeOwnerProfileId = storeOwnerProfile.id;
+                }
+                const store = await this.storeService.createStore(storeOwnerProfileId, storeData);
                 res.status(201).json({
                     success: true,
                     message: "Store created successfully",
@@ -237,23 +273,37 @@ class StoreController {
         };
         this.getStores = async (req, res) => {
             try {
-                const { page = 1, limit = 20, search, type, category, subcategoryId, latitude, longitude, radius = 10000, isActive = true, } = req.query;
-                const stores = await this.storeService.getStores({
+                const userId = req.user?.id; // Get user ID from authenticated request
+                const { page = 1, limit = 20, search, type, category, subcategoryId, latitude, longitude, radius = 10000, isActive, } = req.query;
+                logger_1.default.info(`GetStores request - userId: ${userId}, params:`, {
+                    page, limit, search, type, category, subcategoryId, latitude, longitude, radius, isActive
+                });
+                const { stores, pagination } = await this.storeService.getStores({
                     page: Number(page),
                     limit: Number(limit),
                     search: search,
                     type: type,
-                    categoryId: category, // This will be the category ID from the Category model
-                    subcategoryId: subcategoryId,
+                    categoryId: (category && category !== "undefined" && category !== "") ? category : undefined,
+                    subcategoryId: (subcategoryId && subcategoryId !== "undefined" && subcategoryId !== "") ? subcategoryId : undefined,
                     latitude: latitude ? Number(latitude) : undefined,
                     longitude: longitude ? Number(longitude) : undefined,
                     radius: Number(radius),
-                    isActive: isActive === "true",
+                    isActive: userId ? (isActive === "true") : undefined, // Only apply isActive filter for authenticated users
+                    userId, // Pass user ID for role-based filtering
+                });
+                // Disable caching for this endpoint
+                res.set({
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    'Pragma': 'no-cache',
+                    'Expires': '0'
                 });
                 res.json({
                     success: true,
                     message: "Stores retrieved successfully",
-                    data: stores,
+                    data: {
+                        stores,
+                        pagination,
+                    },
                 });
             }
             catch (error) {
@@ -537,7 +587,7 @@ class StoreController {
         };
         this.deleteSubcategory = async (req, res) => {
             try {
-                const subcategoryId = req.params.id;
+                const subcategoryId = req.params.subcategoryId;
                 const userId = req.user.id;
                 const user = await database_1.default.user.findUnique({
                     where: { id: userId },
@@ -590,7 +640,13 @@ class StoreController {
         // Get categories
         this.getCategories = async (req, res) => {
             try {
+                const { storeType } = req.query; // Add storeType parameter
                 const categories = await database_1.default.category.findMany({
+                    where: storeType ? {
+                        storeTypes: {
+                            has: storeType
+                        }
+                    } : {},
                     include: {
                         subcategories: {
                             include: {
@@ -613,6 +669,7 @@ class StoreController {
                 const categoriesWithStoreCounts = await Promise.all(categories.map(async (category) => {
                     const storeCount = await database_1.default.store.count({
                         where: {
+                            type: storeType ? { in: category.storeTypes } : undefined,
                             products: {
                                 some: {
                                     categoryId: category.id,
@@ -1180,8 +1237,10 @@ class StoreController {
                 const name = req.body.name;
                 const description = req.body.description;
                 const imageFile = req.file;
+                const storeTypes = req.body.storeTypes; // Array of StoreType enums (already validated and converted)
                 console.log("[v0] createCategory - extracted name:", name);
                 console.log("[v0] createCategory - extracted description:", description);
+                console.log("[v0] createCategory - extracted storeTypes:", storeTypes);
                 const userId = req.user.id;
                 console.log("[v0] createCategory - userId:", userId);
                 if (!name) {
@@ -1221,6 +1280,7 @@ class StoreController {
                         name: name.trim(),
                         description: description?.trim() || null,
                         imageUrl,
+                        storeTypes,
                     },
                 });
                 res.status(201).json({
@@ -1242,7 +1302,7 @@ class StoreController {
         this.updateCategory = async (req, res) => {
             try {
                 const { id } = req.params;
-                const { name, description } = req.body;
+                const { name, description, storeTypes } = req.body;
                 const userId = req.user.id;
                 const user = await database_1.default.user.findUnique({
                     where: { id: userId },
@@ -1263,6 +1323,8 @@ class StoreController {
                     });
                 }
                 const updateData = { name, description };
+                if (storeTypes)
+                    updateData.storeTypes = storeTypes;
                 if (req.file) {
                     updateData.imageUrl = await this.fileUploadService.uploadImage(req.file, "categories");
                 }
@@ -1287,7 +1349,7 @@ class StoreController {
         };
         this.deleteCategory = async (req, res) => {
             try {
-                const categoryId = req.params.id;
+                const categoryId = req.params.categoryId;
                 const userId = req.user.id;
                 const user = await database_1.default.user.findUnique({
                     where: { id: userId },
@@ -1334,6 +1396,126 @@ class StoreController {
                 res.status(500).json({
                     success: false,
                     message: "Failed to delete category",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        // Admin: Get all products across all stores
+        this.getAllProducts = async (req, res) => {
+            try {
+                const { page = 1, limit = 20, search, storeId, categoryId, subcategoryId, inStock, sortBy = "createdAt", sortOrder = "desc", } = req.query;
+                const where = {};
+                // Filter by store
+                if (storeId && storeId !== "undefined" && storeId !== "") {
+                    where.storeId = storeId;
+                }
+                // Filter by category
+                if (categoryId && categoryId !== "undefined" && categoryId !== "") {
+                    where.categoryId = categoryId;
+                }
+                // Filter by subcategory
+                if (subcategoryId && subcategoryId !== "undefined" && subcategoryId !== "") {
+                    where.subcategoryId = subcategoryId;
+                }
+                // Filter by stock status
+                if (inStock !== undefined) {
+                    where.inStock = inStock === "true";
+                }
+                // Search in product name or description
+                if (search) {
+                    where.OR = [
+                        { name: { contains: search, mode: "insensitive" } },
+                        { description: { contains: search, mode: "insensitive" } },
+                    ];
+                }
+                const skip = (Number(page) - 1) * Number(limit);
+                // Build order by
+                const orderBy = {};
+                orderBy[sortBy] = sortOrder === "asc" ? "asc" : "desc";
+                const [products, total] = await Promise.all([
+                    database_1.default.product.findMany({
+                        where,
+                        include: {
+                            store: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    type: true,
+                                    isActive: true,
+                                    location: {
+                                        select: {
+                                            city: true,
+                                            state: true,
+                                        },
+                                    },
+                                    owner: {
+                                        include: {
+                                            user: {
+                                                select: {
+                                                    firstName: true,
+                                                    lastName: true,
+                                                    email: true,
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                            category: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    description: true,
+                                },
+                            },
+                            subcategory: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    description: true,
+                                    category: {
+                                        select: {
+                                            id: true,
+                                            name: true,
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        orderBy,
+                        skip,
+                        take: Number(limit),
+                    }),
+                    database_1.default.product.count({ where }),
+                ]);
+                res.json({
+                    success: true,
+                    message: "Products retrieved successfully",
+                    data: {
+                        products,
+                        pagination: {
+                            page: Number(page),
+                            limit: Number(limit),
+                            total,
+                            totalPages: Math.ceil(total / Number(limit)),
+                        },
+                        filters: {
+                            search: search,
+                            storeId: storeId,
+                            categoryId: categoryId,
+                            subcategoryId: subcategoryId,
+                            inStock: inStock === "true",
+                            sortBy: sortBy,
+                            sortOrder: sortOrder,
+                        },
+                    },
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Get all products error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to retrieve products",
                     error: error instanceof Error ? error.message : "Unknown error",
                 });
             }

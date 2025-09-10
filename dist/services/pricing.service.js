@@ -568,9 +568,9 @@ class PricingService {
             this.validateCoordinates(pickupLatitude, pickupLongitude);
             this.validateCoordinates(dropoffLatitude, dropoffLongitude);
             this.validateDeliveryType(deliveryType);
-            // Get service type
+            // Get service type - use DELIVERY service type from database
             const serviceType = await database_1.default.serviceType.findFirst({
-                where: { name: "PACKAGE_DELIVERY" },
+                where: { name: "DELIVERY" },
             });
             if (!serviceType) {
                 throw new Error("Delivery service type not found");
@@ -579,9 +579,10 @@ class PricingService {
             const { distance, duration } = await this.locationService.getEstimatedTravelTime(pickupLatitude, pickupLongitude, dropoffLatitude, dropoffLongitude);
             // Apply delivery type multiplier
             const multiplier = this.config.deliveryTypeMultipliers[deliveryType];
-            // UPDATED: Enhanced delivery pricing for Ghana
+            // UPDATED: Reasonable delivery pricing for store pickup
             const basePrice = (serviceType.basePrice || 2) * multiplier;
-            const distancePrice = (distance / 1000) * (serviceType.pricePerKm || 0.8);
+            // Use lower per-km rate for store delivery (more reasonable than general delivery)
+            const distancePrice = (distance / 1000) * 0.5; // GH₵0.50 per km for store delivery
             const subtotal = basePrice + distancePrice;
             const estimatedPrice = this.applyMinimumFare(Math.round(subtotal));
             console.log(`📦 DELIVERY CALCULATION START`);
@@ -590,7 +591,7 @@ class PricingService {
             console.log(`📋 Delivery Type: ${deliveryType}`);
             console.log(`🔢 Type Multiplier: ${multiplier}x`);
             console.log(`💰 Base Price: GH₵${serviceType.basePrice || 2} × ${multiplier} = GH₵${basePrice.toFixed(2)}`);
-            console.log(`📏 Distance Cost: ${(distance / 1000).toFixed(2)}km × GH₵${serviceType.pricePerKm || 0.8} = GH₵${distancePrice.toFixed(2)}`);
+            console.log(`📏 Distance Cost: ${(distance / 1000).toFixed(2)}km × GH₵0.50 = GH₵${distancePrice.toFixed(2)}`);
             console.log(`💵 Subtotal: GH₵${subtotal.toFixed(2)}`);
             console.log(`💵 Final Price (min GH₵${this.config.minimumFare}): GH₵${estimatedPrice}`);
             // NEW: Delivery price stability check

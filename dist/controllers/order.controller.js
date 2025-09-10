@@ -148,16 +148,14 @@ class OrderController {
                         deliveryLocation: true,
                         serviceLocation: true,
                         orderItems: {
-                            include: {
-                                product: {
-                                    select: {
-                                        id: true,
-                                        name: true,
-                                        description: true,
-                                        image: true,
-                                        price: true
-                                    }
-                                }
+                            select: {
+                                id: true,
+                                name: true,
+                                description: true,
+                                quantity: true,
+                                unitPrice: true,
+                                totalPrice: true,
+                                instructions: true
                             }
                         },
                         delivery: {
@@ -316,7 +314,7 @@ class OrderController {
                         orderId: currentOrder.id,
                         orderNumber: currentOrder.orderNumber,
                         status: status,
-                        storeName: currentOrder.store.name
+                        storeName: currentOrder.store?.name
                     }
                 });
                 res.json({
@@ -515,26 +513,28 @@ class OrderController {
                         deliveryLocation: true,
                         serviceLocation: true,
                         orderItems: {
-                            include: {
-                                product: {
-                                    select: {
-                                        id: true,
-                                        name: true,
-                                        description: true,
-                                        image: true,
-                                        price: true
-                                    }
-                                }
+                            select: {
+                                id: true,
+                                name: true,
+                                description: true,
+                                quantity: true,
+                                unitPrice: true,
+                                totalPrice: true,
+                                instructions: true
                             }
                         },
                         delivery: {
                             include: {
                                 dispatchRider: {
-                                    select: {
-                                        id: true,
-                                        firstName: true,
-                                        lastName: true,
-                                        phone: true
+                                    include: {
+                                        user: {
+                                            select: {
+                                                id: true,
+                                                firstName: true,
+                                                lastName: true,
+                                                phone: true
+                                            }
+                                        }
                                     }
                                 }
                             }

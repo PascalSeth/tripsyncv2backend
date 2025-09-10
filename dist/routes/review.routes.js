@@ -10,6 +10,8 @@ const router = (0, express_1.Router)();
 const reviewController = new review_controller_1.ReviewController();
 // Review submission and management
 router.post("/", auth_middleware_1.authMiddleware, (0, validation_middleware_1.validateRequest)(review_validation_1.reviewValidation.submitReview), reviewController.submitReview);
+// Specific driver rating endpoint
+router.post("/driver-rating", auth_middleware_1.authMiddleware, (0, validation_middleware_1.validateRequest)(review_validation_1.reviewValidation.submitDriverRating), reviewController.submitDriverRating);
 router.get("/", reviewController.getReviews);
 router.get("/:id", reviewController.getReviewById);
 router.put("/:id", auth_middleware_1.authMiddleware, (0, validation_middleware_1.validateRequest)(review_validation_1.reviewValidation.updateReview), reviewController.updateReview);

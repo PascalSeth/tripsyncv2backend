@@ -30,28 +30,30 @@ auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["SUPER_
 router.delete("/subcategories/:subcategoryId", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["SUPER_ADMIN"]), storeController.deleteSubcategory);
 // Admin routes for store owners
 router.get("/owners/all", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["SUPER_ADMIN", "CITY_ADMIN"]), storeController.getAllStoreOwners);
+// Admin product management - get all products across all stores
+router.get("/admin/products", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["SUPER_ADMIN", "CITY_ADMIN"]), storeController.getAllProducts);
 router.put("/owners/:ownerId/verify", // Changed from :id to :ownerId for clarity
 auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["SUPER_ADMIN", "CITY_ADMIN"]), storeController.verifyStoreOwner);
 router.put("/owners/:ownerId/reject", // Changed from :id to :ownerId for clarity
 auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["SUPER_ADMIN", "CITY_ADMIN"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.rejectStoreOwner), storeController.rejectStoreOwner);
 // Store management - PARAMETERIZED ROUTES COME AFTER SPECIFIC ROUTES
-router.post("/", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.createStore), storeController.createStore);
+router.post("/", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER", "SUPER_ADMIN"]), storeController.uploadStoreImage, (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.createStore), storeController.createStore);
 router.get("/", storeController.getStores);
 // This parameterized route must come AFTER all specific routes
 router.get("/:id", storeController.getStoreById);
 router.put("/:id", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER", "SUPER_ADMIN", "CITY_ADMIN"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.updateStore), storeController.updateStore);
 router.delete("/:id", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER", "SUPER_ADMIN", "CITY_ADMIN"]), storeController.deleteStore);
 // Product management
-router.post("/:id/products", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.addProduct), storeController.addProduct);
+router.post("/:id/products", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER", "SUPER_ADMIN"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.addProduct), storeController.addProduct);
 router.get("/:id/products", storeController.getProducts);
-router.put("/:id/products/:productId", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.updateProduct), storeController.updateProduct);
-router.delete("/:id/products/:productId", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER"]), storeController.deleteProduct);
+router.put("/:id/products/:productId", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER", "SUPER_ADMIN"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.updateProduct), storeController.updateProduct);
+router.delete("/:id/products/:productId", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER", "SUPER_ADMIN"]), storeController.deleteProduct);
 // Business hours
 router.put("/:id/business-hours", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.updateBusinessHours), storeController.updateBusinessHours);
 router.get("/:id/business-hours", storeController.getBusinessHours);
 // Analytics
 router.get("/:id/analytics", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER"]), storeController.getStoreAnalytics);
 // Inventory management
-router.put("/:id/products/:productId/inventory", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.updateInventory), storeController.updateInventory);
-router.get("/:id/low-stock", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER"]), storeController.getLowStockProducts);
+router.put("/:id/products/:productId/inventory", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER", "SUPER_ADMIN"]), (0, validation_middleware_1.validateRequest)(store_validation_1.storeValidation.updateInventory), storeController.updateInventory);
+router.get("/:id/low-stock", auth_middleware_1.authMiddleware, (0, rbac_middleware_1.rbacMiddleware)(["STORE_OWNER", "SUPER_ADMIN"]), storeController.getLowStockProducts);
 exports.default = router;

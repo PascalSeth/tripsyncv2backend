@@ -1,11 +1,30 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
+const multer_1 = __importDefault(require("multer"));
 const place_controller_1 = require("../controllers/place.controller");
 const validation_middleware_1 = require("../middleware/validation.middleware");
 const place_validation_1 = require("../validations/place.validation");
 const rbac_middleware_1 = require("../middleware/rbac.middleware");
 const auth_middleware_1 = require("../middleware/auth.middleware");
+// Configure multer for image uploads
+const upload = (0, multer_1.default)({
+    limits: {
+        fileSize: 5 * 1024 * 1024, // 5MB limit
+    },
+    fileFilter: (req, file, cb) => {
+        // Check if file is an image
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        }
+        else {
+            cb(new Error('Only image files are allowed'));
+        }
+    },
+});
 const router = (0, express_1.Router)();
 const placeController = new place_controller_1.PlaceController();
 // Public routes (no authentication required)
@@ -23,7 +42,7 @@ router.use(auth_middleware_1.authMiddleware);
 router.post("/vote", (0, validation_middleware_1.validateRequest)(place_validation_1.placeValidation.userVote), placeController.submitUserVote);
 router.get("/user/votes", placeController.getUserVotes);
 // Place management (Place owners and admins)
-router.post("/", (0, validation_middleware_1.validateRequest)(place_validation_1.placeValidation.createPlace), placeController.createPlace);
+router.post("/", upload.single('image'), (0, validation_middleware_1.validateRequest)(place_validation_1.placeValidation.createPlace), placeController.createPlace);
 router.put("/:id", (0, validation_middleware_1.validateRequest)(place_validation_1.placeValidation.updatePlace), placeController.updatePlace);
 router.delete("/:id", placeController.deletePlace);
 // Photo management

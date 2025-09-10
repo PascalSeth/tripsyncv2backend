@@ -18,7 +18,6 @@ exports.placeValidation = {
         openingHours: joi_1.default.string().max(500).optional(),
         priceLevel: joi_1.default.string().valid("BUDGET", "MODERATE", "EXPENSIVE", "LUXURY").optional(),
         tags: joi_1.default.string().max(200).optional(),
-        imageUrl: joi_1.default.string().uri().optional(),
     }),
     updatePlace: joi_1.default.object({
         name: joi_1.default.string().min(2).max(100).optional(),

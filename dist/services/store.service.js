@@ -6,23 +6,25 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.StoreService = void 0;
 const database_1 = __importDefault(require("../config/database"));
 const location_service_1 = require("./location.service");
+const pricing_service_1 = require("./pricing.service");
 const logger_1 = __importDefault(require("../utils/logger"));
 class StoreService {
     constructor() {
         this.locationService = new location_service_1.LocationService();
+        this.pricingService = new pricing_service_1.PricingService();
     }
     async createStore(ownerId, storeData) {
         try {
             // Create location first
             const location = await database_1.default.location.create({
                 data: {
-                    latitude: storeData.latitude,
-                    longitude: storeData.longitude,
-                    address: storeData.address,
+                    latitude: storeData.latitude, // Default to Nigeria's approximate center latitude
+                    longitude: storeData.longitude, // Default to Nigeria's approximate center longitude
+                    address: storeData.address || "Unknown",
                     city: storeData.city || "Unknown",
-                    state: storeData.state,
+                    state: storeData.state || "Unknown",
                     country: storeData.country || "Nigeria",
-                    postalCode: storeData.postalCode,
+                    postalCode: storeData.zipCode || "000000",
                 },
             });
             // Create store
@@ -32,10 +34,11 @@ class StoreService {
                     type: storeData.type,
                     locationId: location.id,
                     ownerId,
-                    contactPhone: storeData.contactPhone,
-                    contactEmail: storeData.contactEmail,
+                    contactPhone: storeData.phone,
+                    contactEmail: storeData.email,
                     operatingHours: storeData.operatingHours || "9:00 AM - 9:00 PM",
                     description: storeData.description,
+                    image: storeData.image,
                     isActive: true,
                 },
                 include: {
@@ -68,9 +71,40 @@ class StoreService {
     async getStores(params) {
         try {
             const { page, limit, search, type, categoryId, // Updated parameter name
-            subcategoryId, latitude, longitude, radius = 10000, isActive = true, } = params;
+            subcategoryId, latitude, longitude, radius = 10000, isActive, userId, } = params;
             const skip = (page - 1) * limit;
-            const where = { isActive };
+            const where = {};
+            // Role-based filtering
+            if (userId) {
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                    select: { role: true },
+                });
+                if (user?.role === "STORE_OWNER") {
+                    // Store owners can only see their own stores
+                    const storeOwnerProfile = await database_1.default.storeOwnerProfile.findUnique({
+                        where: { userId },
+                        select: { id: true },
+                    });
+                    if (storeOwnerProfile) {
+                        where.ownerId = storeOwnerProfile.id;
+                    }
+                    else {
+                        // If no store owner profile, return empty result
+                        return {
+                            stores: [],
+                            pagination: {
+                                page,
+                                limit,
+                                total: 0,
+                                totalPages: 0,
+                            },
+                        };
+                    }
+                }
+                // SUPER_ADMIN and CITY_ADMIN can see all stores (no additional filtering)
+            }
+            // Apply other filters
             if (search) {
                 where.OR = [
                     { name: { contains: search, mode: "insensitive" } },
@@ -78,15 +112,16 @@ class StoreService {
                 ];
             }
             if (type) {
+                logger_1.default.info(`Applying type filter: ${type}`);
                 where.type = type;
             }
-            if (categoryId || subcategoryId) {
-                where.products = {
-                    some: {
-                        ...(categoryId && { categoryId }),
-                        ...(subcategoryId && { subcategoryId }),
-                    },
-                };
+            else {
+                logger_1.default.info(`No type filter applied`);
+            }
+            // Only apply isActive filter for authenticated users
+            // Unauthenticated users can see all stores
+            if (userId && isActive !== undefined) {
+                where.isActive = isActive;
             }
             let stores = await database_1.default.store.findMany({
                 where,
@@ -123,23 +158,102 @@ class StoreService {
                 take: limit,
                 orderBy: { name: "asc" },
             });
-            // Filter by location if coordinates provided
-            if (latitude && longitude) {
-                stores = stores.filter((store) => {
-                    if (!store.location)
-                        return false;
-                    const distance = this.locationService.calculateDistance(latitude, longitude, store.location.latitude, store.location.longitude);
-                    return distance <= radius;
+            // Get total count before location filtering
+            let total = await database_1.default.store.count({ where });
+            // Apply location-based filtering if coordinates are provided
+            if (latitude !== undefined && longitude !== undefined && radius !== undefined) {
+                // For location filtering, we need to get all stores first to filter by distance
+                const allStores = await database_1.default.store.findMany({
+                    where,
+                    include: {
+                        location: true,
+                        owner: {
+                            include: {
+                                user: {
+                                    select: {
+                                        firstName: true,
+                                        lastName: true,
+                                    },
+                                },
+                            },
+                        },
+                        products: {
+                            take: 5,
+                            include: {
+                                category: true,
+                                subcategory: {
+                                    include: {
+                                        category: true,
+                                    },
+                                },
+                            },
+                        },
+                        _count: {
+                            select: {
+                                products: true,
+                            },
+                        },
+                    },
                 });
+                logger_1.default.info(`Location filtering: center (${latitude}, ${longitude}), radius: ${radius}m`);
+                logger_1.default.info(`Found ${allStores.length} stores before location filtering`);
+                logger_1.default.info(`Store details before filtering:`);
+                allStores.forEach(store => {
+                    logger_1.default.info(`- ${store.name} (${store.type}): (${store.location?.latitude}, ${store.location?.longitude})`);
+                });
+                // Filter by distance and add distance to store objects
+                const storesWithDistance = await Promise.all(allStores
+                    .filter((store) => {
+                    if (!store.location?.latitude || !store.location?.longitude) {
+                        logger_1.default.info(`Store ${store.id} (${store.name}) has no location data`);
+                        return false;
+                    }
+                    return true;
+                })
+                    .map(async (store) => {
+                    // Calculate driving distance using Google Maps
+                    const distance = await this.locationService.calculateDrivingDistance(latitude, longitude, store.location.latitude, store.location.longitude);
+                    const withinRadius = distance <= radius;
+                    logger_1.default.info(`Store ${store.id} (${store.name}): location (${store.location.latitude}, ${store.location.longitude}), driving distance: ${distance.toFixed(2)}m, within radius: ${withinRadius}`);
+                    if (!withinRadius) {
+                        return null; // Will be filtered out
+                    }
+                    // Calculate delivery fee using pricing service
+                    const deliveryEstimate = await this.pricingService.calculateDeliveryEstimate({
+                        pickupLatitude: store.location.latitude,
+                        pickupLongitude: store.location.longitude,
+                        dropoffLatitude: latitude,
+                        dropoffLongitude: longitude,
+                        deliveryType: "PACKAGE"
+                    });
+                    // Calculate delivery time based on distance
+                    const deliveryTimeMinutes = Math.max(15, Math.min(60, Math.round(distance / 1000 * 2) + 15)); // 2 min per km + 15 min base, capped at 15-60 min
+                    return {
+                        ...store,
+                        distance: Math.round(distance / 1000 * 10) / 10, // Convert to km and round to 1 decimal place
+                        deliveryTime: `${deliveryTimeMinutes} min`, // Dynamic delivery time based on distance
+                        deliveryFee: deliveryEstimate.estimatedPrice, // Dynamic delivery fee calculation
+                    };
+                }));
+                // Filter out null values (stores outside radius)
+                stores = storesWithDistance.filter(store => store !== null);
+                logger_1.default.info(`After location filtering: ${stores.length} stores`);
+                logger_1.default.info(`Filtered store details:`);
+                stores.forEach(store => {
+                    logger_1.default.info(`- ${store.name} (${store.type}): (${store.location?.latitude}, ${store.location?.longitude})`);
+                });
+                // Update total to reflect filtered count
+                total = stores.length;
+                // Apply pagination to filtered results
+                stores = stores.slice(skip, skip + limit);
             }
-            const total = await database_1.default.store.count({ where });
             return {
                 stores,
                 pagination: {
                     page,
                     limit,
-                    total: latitude && longitude ? stores.length : total,
-                    totalPages: Math.ceil((latitude && longitude ? stores.length : total) / limit),
+                    total,
+                    totalPages: Math.ceil(total / limit),
                 },
             };
         }
@@ -307,7 +421,13 @@ class StoreService {
                 throw new Error("Store not found");
             }
             if (store.owner.userId !== userId) {
-                throw new Error("Unauthorized to add products to this store");
+                // Check if user is admin
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                });
+                if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+                    throw new Error("Unauthorized to add products to this store");
+                }
             }
             if (productData.categoryId) {
                 const category = await database_1.default.category.findUnique({
@@ -427,7 +547,13 @@ class StoreService {
                 throw new Error("Product not found");
             }
             if (product.store.owner.userId !== userId) {
-                throw new Error("Unauthorized to update this product");
+                // Check if user is admin
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                });
+                if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+                    throw new Error("Unauthorized to update this product");
+                }
             }
             if (updateData.categoryId) {
                 const category = await database_1.default.category.findUnique({
@@ -486,7 +612,13 @@ class StoreService {
                 throw new Error("Product not found");
             }
             if (product.store.owner.userId !== userId) {
-                throw new Error("Unauthorized to delete this product");
+                // Check if user is admin
+                const user = await database_1.default.user.findUnique({
+                    where: { id: userId },
+                });
+                if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+                    throw new Error("Unauthorized to delete this product");
+                }
             }
             await database_1.default.product.delete({
                 where: { id: productId },
@@ -627,7 +759,13 @@ class StoreService {
                 throw new Error("Product not found");
             }
             if (product.store.owner.userId !== data.userId) {
-                throw new Error("Unauthorized to update inventory for this product");
+                // Check if user is admin
+                const user = await database_1.default.user.findUnique({
+                    where: { id: data.userId },
+                });
+                if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+                    throw new Error("Unauthorized to update inventory for this product");
+                }
             }
             let newStockQuantity;
             switch (data.operation) {
@@ -677,7 +815,13 @@ class StoreService {
                 throw new Error("Store not found");
             }
             if (store.owner.userId !== params.userId) {
-                throw new Error("Unauthorized to view products for this store");
+                // Check if user is admin
+                const user = await database_1.default.user.findUnique({
+                    where: { id: params.userId },
+                });
+                if (!user || !["SUPER_ADMIN", "CITY_ADMIN"].includes(user.role)) {
+                    throw new Error("Unauthorized to view products for this store");
+                }
             }
             const products = await database_1.default.product.findMany({
                 where: {

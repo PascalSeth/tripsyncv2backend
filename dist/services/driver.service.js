@@ -411,6 +411,13 @@ class DriverService {
                 },
                 include: {
                     customer: true,
+                    provider: {
+                        select: {
+                            id: true,
+                            firstName: true,
+                            lastName: true,
+                        },
+                    },
                     serviceType: true,
                 },
             });
@@ -536,6 +543,19 @@ class DriverService {
                     finalPrice,
                     distance: completionData.actualDistance,
                     duration: completionData.actualDuration,
+                },
+                priority: "STANDARD",
+            });
+            // Send review request notification for driver rating
+            await this.notificationService.notifyCustomer(booking.customerId, {
+                type: "REVIEW_REQUEST",
+                title: "Rate Your Driver",
+                body: `How was your experience with your driver? Please rate your driver.`,
+                data: {
+                    bookingId,
+                    driverId: booking.providerId,
+                    reviewType: "SERVICE_PROVIDER",
+                    promptType: "DRIVER_RATING",
                 },
                 priority: "STANDARD",
             });

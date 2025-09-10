@@ -111,7 +111,7 @@ class PurchaseConfirmationService {
             // Update order status
             await database_1.default.order.update({
                 where: { id: confirmation.orderId },
-                data: { status: "CONFIRMED" }
+                data: { status: "ORDER_CONFIRMED" }
             });
             // Send confirmation email to customer
             await this.sendPurchaseConfirmedEmail(confirmation);

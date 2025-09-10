@@ -19,7 +19,21 @@ class PlaceController {
         this.createPlace = async (req, res) => {
             try {
                 const userId = req.user?.id;
-                const { name, description, categoryId, latitude, longitude, address, contactInfo, websiteUrl, openingHours, priceLevel, tags, imageUrl, } = req.body;
+                const { name, description, categoryId, latitude, longitude, address, contactInfo, websiteUrl, openingHours, priceLevel, tags, } = req.body;
+                // Handle image file upload
+                let imageUrl = null;
+                if (req.file) {
+                    try {
+                        imageUrl = await this.fileUploadService.uploadImage(req.file, `places/${Date.now()}`, {
+                            width: 800,
+                            height: 600,
+                        });
+                    }
+                    catch (uploadError) {
+                        logger_1.default.error("Image upload error:", uploadError);
+                        // Continue without image rather than failing the entire request
+                    }
+                }
                 // Check if user can create places
                 if (!userId) {
                     return res.status(401).json({
@@ -38,15 +52,41 @@ class PlaceController {
                         message: "Insufficient permissions to create places",
                     });
                 }
-                // Create location first
+                // Create location with geocoding
+                let locationData = {
+                    latitude,
+                    longitude,
+                    address,
+                };
+                // Try to geocode the coordinates to get city and country
+                try {
+                    const geocodedData = await this.locationService.reverseGeocode(latitude, longitude);
+                    if (geocodedData) {
+                        locationData.city = geocodedData.city;
+                        locationData.state = geocodedData.state;
+                        locationData.country = geocodedData.country;
+                        locationData.postalCode = geocodedData.postalCode;
+                        // Update address if we got a better formatted address
+                        if (geocodedData.formattedAddress && geocodedData.formattedAddress !== address) {
+                            locationData.address = geocodedData.formattedAddress;
+                        }
+                        logger_1.default.info(`Geocoded location: ${geocodedData.city}, ${geocodedData.country}`);
+                    }
+                    else {
+                        // Fallback to defaults
+                        locationData.city = "Unknown";
+                        locationData.country = "Unknown";
+                        logger_1.default.warn(`Failed to geocode coordinates: ${latitude}, ${longitude}`);
+                    }
+                }
+                catch (geocodeError) {
+                    logger_1.default.error("Geocoding error:", geocodeError);
+                    // Fallback to defaults
+                    locationData.city = "Unknown";
+                    locationData.country = "Unknown";
+                }
                 const location = await database_1.default.location.create({
-                    data: {
-                        latitude,
-                        longitude,
-                        address,
-                        city: "Unknown", // You might want to geocode this
-                        country: "Nigeria",
-                    },
+                    data: locationData,
                 });
                 // Create place
                 const place = await database_1.default.place.create({

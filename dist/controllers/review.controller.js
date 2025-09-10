@@ -69,6 +69,7 @@ class ReviewController {
                             select: {
                                 firstName: true,
                                 lastName: true,
+                                avatar: true,
                             },
                         },
                         booking: {
@@ -115,6 +116,146 @@ class ReviewController {
                 res.status(500).json({
                     success: false,
                     message: "Failed to submit review",
+                    error: error instanceof Error ? error.message : "Unknown error",
+                });
+            }
+        };
+        this.submitDriverRating = async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const { driverId, bookingId, rating, comment, serviceRating, timelinessRating, cleanlinessRating, communicationRating, } = req.body;
+                // Validate required fields
+                if (!driverId || !bookingId || !rating) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "Driver ID, booking ID, and rating are required",
+                    });
+                }
+                // Validate that the user was the customer for this booking
+                const booking = await database_1.default.booking.findUnique({
+                    where: { id: bookingId },
+                    include: {
+                        customer: {
+                            select: {
+                                id: true,
+                                firstName: true,
+                                lastName: true,
+                            },
+                        },
+                        provider: {
+                            select: {
+                                id: true,
+                                firstName: true,
+                                lastName: true,
+                            },
+                        },
+                    },
+                });
+                if (!booking) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "Booking not found",
+                    });
+                }
+                if (booking.customerId !== userId) {
+                    return res.status(403).json({
+                        success: false,
+                        message: "You can only rate drivers for your own bookings",
+                    });
+                }
+                if (booking.providerId !== driverId) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "The specified driver is not associated with this booking",
+                    });
+                }
+                if (booking.status !== "COMPLETED") {
+                    return res.status(400).json({
+                        success: false,
+                        message: "You can only rate drivers after the trip is completed",
+                    });
+                }
+                // Check if user has already rated this driver for this booking
+                const existingReview = await database_1.default.review.findFirst({
+                    where: {
+                        giverId: userId,
+                        receiverId: driverId,
+                        bookingId,
+                        type: "SERVICE_PROVIDER",
+                    },
+                });
+                if (existingReview) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "You have already rated this driver for this booking",
+                    });
+                }
+                // Create driver rating review
+                const review = await database_1.default.review.create({
+                    data: {
+                        giverId: userId,
+                        receiverId: driverId,
+                        bookingId,
+                        rating,
+                        comment,
+                        type: "SERVICE_PROVIDER",
+                        serviceRating,
+                        timelinessRating,
+                        cleanlinessRating,
+                        communicationRating,
+                        isVerified: true,
+                    },
+                    include: {
+                        giver: {
+                            select: {
+                                firstName: true,
+                                lastName: true,
+                                avatar: true,
+                            },
+                        },
+                        receiver: {
+                            select: {
+                                firstName: true,
+                                lastName: true,
+                            },
+                        },
+                        booking: {
+                            select: {
+                                serviceType: {
+                                    select: {
+                                        displayName: true,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                });
+                // Update driver's rating
+                await this.reviewService.updateUserRating(driverId, "SERVICE_PROVIDER");
+                // Send notification to driver
+                await this.notificationService.notifyCustomer(driverId, {
+                    type: "NEW_REVIEW",
+                    title: "New Driver Rating",
+                    body: `You received a ${rating}-star rating from ${review.giver.firstName}`,
+                    data: {
+                        reviewId: review.id,
+                        rating,
+                        reviewerName: `${review.giver.firstName} ${review.giver.lastName}`,
+                        bookingId,
+                    },
+                    priority: "STANDARD",
+                });
+                res.status(201).json({
+                    success: true,
+                    message: "Driver rating submitted successfully",
+                    data: review,
+                });
+            }
+            catch (error) {
+                logger_1.default.error("Submit driver rating error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to submit driver rating",
                     error: error instanceof Error ? error.message : "Unknown error",
                 });
             }

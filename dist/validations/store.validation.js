@@ -33,28 +33,52 @@ exports.storeValidation = {
         }),
     }),
     createStore: joi_1.default.object({
-        body: joi_1.default.object({
-            name: joi_1.default.string().required(),
-            type: joi_1.default.string().required(),
-            latitude: joi_1.default.number().required(),
-            longitude: joi_1.default.number().required(),
-            address: joi_1.default.string().required(),
-            city: joi_1.default.string().optional(),
-            state: joi_1.default.string().optional(),
-            zipCode: joi_1.default.string().optional(),
-            phone: joi_1.default.string().optional(),
-            email: joi_1.default.string().email().optional(),
-            description: joi_1.default.string().optional(),
-            image: joi_1.default.string().optional(),
-            businessHours: joi_1.default.array()
-                .items(joi_1.default.object({
-                dayOfWeek: joi_1.default.number().min(0).max(6).required(),
-                openTime: joi_1.default.string().required(),
-                closeTime: joi_1.default.string().required(),
-                isClosed: joi_1.default.boolean().optional(),
-            }))
-                .optional(),
-        }),
+        name: joi_1.default.string().required(),
+        type: joi_1.default.string().required(),
+        latitude: joi_1.default.number().required(),
+        longitude: joi_1.default.number().required(),
+        address: joi_1.default.string().required(),
+        city: joi_1.default.string().optional(),
+        state: joi_1.default.string().optional(),
+        zipCode: joi_1.default.string().optional(),
+        phone: joi_1.default.string().optional(),
+        email: joi_1.default.string().email().optional(),
+        description: joi_1.default.string().optional(),
+        image: joi_1.default.string().optional(),
+        businessHours: joi_1.default.alternatives()
+            .try(joi_1.default.array().items(joi_1.default.object({
+            dayOfWeek: joi_1.default.number().min(0).max(6).required(),
+            openTime: joi_1.default.string().required(),
+            closeTime: joi_1.default.string().required(),
+            isClosed: joi_1.default.boolean().optional(),
+        })), joi_1.default.string().custom((value, helpers) => {
+            try {
+                const parsed = JSON.parse(value);
+                if (!Array.isArray(parsed)) {
+                    return helpers.error('any.invalid');
+                }
+                // Validate each item
+                for (const item of parsed) {
+                    if (typeof item !== 'object' || item === null) {
+                        return helpers.error('any.invalid');
+                    }
+                    if (typeof item.dayOfWeek !== 'number' || item.dayOfWeek < 0 || item.dayOfWeek > 6) {
+                        return helpers.error('any.invalid');
+                    }
+                    if (typeof item.openTime !== 'string' || typeof item.closeTime !== 'string') {
+                        return helpers.error('any.invalid');
+                    }
+                    if (item.isClosed !== undefined && typeof item.isClosed !== 'boolean') {
+                        return helpers.error('any.invalid');
+                    }
+                }
+                return parsed;
+            }
+            catch {
+                return helpers.error('any.invalid');
+            }
+        }))
+            .optional(),
     }),
     updateStore: joi_1.default.object({
         body: joi_1.default.object({
@@ -123,10 +147,70 @@ exports.storeValidation = {
     createCategory: joi_1.default.object({
         name: joi_1.default.string().required(),
         description: joi_1.default.string().optional(),
+        storeTypes: joi_1.default.any().custom((value, helpers) => {
+            let arr;
+            if (Array.isArray(value)) {
+                arr = value;
+            }
+            else if (typeof value === 'string') {
+                try {
+                    arr = JSON.parse(value);
+                    if (!Array.isArray(arr)) {
+                        arr = [arr];
+                    }
+                }
+                catch {
+                    arr = [value];
+                }
+            }
+            else {
+                return helpers.error('any.invalid');
+            }
+            if (arr.length === 0) {
+                return helpers.error('any.invalid');
+            }
+            const validTypes = ["GROCERY", "PHARMACY", "RESTAURANT", "RETAIL", "ELECTRONICS", "OTHER"];
+            for (const item of arr) {
+                if (!validTypes.includes(item)) {
+                    return helpers.error('any.invalid');
+                }
+            }
+            return arr;
+        }).required(),
     }),
     updateCategory: joi_1.default.object({
         name: joi_1.default.string().optional(),
         description: joi_1.default.string().optional(),
+        storeTypes: joi_1.default.any().custom((value, helpers) => {
+            let arr;
+            if (Array.isArray(value)) {
+                arr = value;
+            }
+            else if (typeof value === 'string') {
+                try {
+                    arr = JSON.parse(value);
+                    if (!Array.isArray(arr)) {
+                        arr = [arr];
+                    }
+                }
+                catch {
+                    arr = [value];
+                }
+            }
+            else {
+                return helpers.error('any.invalid');
+            }
+            if (arr.length === 0) {
+                return helpers.error('any.invalid');
+            }
+            const validTypes = ["GROCERY", "PHARMACY", "RESTAURANT", "RETAIL", "ELECTRONICS", "OTHER"];
+            for (const item of arr) {
+                if (!validTypes.includes(item)) {
+                    return helpers.error('any.invalid');
+                }
+            }
+            return arr;
+        }).optional(),
     }),
     createSubcategory: joi_1.default.object({
         name: joi_1.default.string().required(),

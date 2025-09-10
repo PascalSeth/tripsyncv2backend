@@ -1297,7 +1297,7 @@ class DispatchRiderService {
             if (!order.store || order.store.owner.userId !== storeOwnerId) {
                 throw new Error("Unauthorized to manage this order");
             }
-            if (order.status !== "CONFIRMED") {
+            if (order.status !== "ORDER_CONFIRMED") {
                 throw new Error("Order must be confirmed before marking as ready");
             }
             // Update order status

@@ -27,6 +27,18 @@ exports.reviewValidation = {
             return value;
         }),
     }),
+    submitDriverRating: joi_1.default.object({
+        body: joi_1.default.object({
+            driverId: joi_1.default.string().required(),
+            bookingId: joi_1.default.string().required(),
+            rating: joi_1.default.number().min(1).max(5).required(),
+            comment: joi_1.default.string().optional(),
+            serviceRating: joi_1.default.number().min(1).max(5).optional(),
+            timelinessRating: joi_1.default.number().min(1).max(5).optional(),
+            cleanlinessRating: joi_1.default.number().min(1).max(5).optional(),
+            communicationRating: joi_1.default.number().min(1).max(5).optional(),
+        }),
+    }),
     updateReview: joi_1.default.object({
         body: joi_1.default.object({
             rating: joi_1.default.number().min(1).max(5).optional(),
