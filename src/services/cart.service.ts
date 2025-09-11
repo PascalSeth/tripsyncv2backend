@@ -363,11 +363,10 @@ export class CartService {
           instructions: orderData.specialInstructions
         }
 
-        // For now, create a simple order item record
-        // Note: The schema might need adjustment for proper Order-OrderItem relation
+        // Create order item record
         const orderItem = await prisma.orderItem.create({
           data: {
-            bookingId: order.id, // Temporary workaround - should be orderId
+            bookingId: order.id, // Using bookingId as orderId for now - this should be fixed in schema
             ...orderItemData
           }
         })

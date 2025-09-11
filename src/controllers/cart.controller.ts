@@ -246,4 +246,29 @@ export class CartController {
       })
     }
   }
+
+  // Get cart items with product details
+  getCartItems = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user!.id
+      const cart = await this.cartService.getOrCreateCart(userId)
+
+      res.json({
+        success: true,
+        message: "Cart items retrieved successfully",
+        data: cart
+      })
+    } catch (error) {
+      logger.error("Get cart items error:", error)
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve cart items",
+        error: error instanceof Error ? error.message : "Unknown error"
+      })
+    }
+  }
+
+
+
+
 }
