@@ -256,7 +256,10 @@ export class DriverService {
 
   async arriveAtPickup(driverId: string, bookingId: string) {
     try {
-      const booking = await prisma.booking.findFirst({
+      // First, let's log what we're looking for
+      console.log(`🔍 ArriveAtPickup: Looking for booking ${bookingId} for driver ${driverId}`)
+
+      let booking = await prisma.booking.findFirst({
         where: {
           id: bookingId,
           providerId: driverId,
@@ -265,9 +268,42 @@ export class DriverService {
         include: { customer: true },
       })
 
+      // If not found with DRIVER_ASSIGNED, let's check what the actual status is
       if (!booking) {
-        throw new Error("Booking not found or invalid status")
+        console.log(`⚠️ Booking ${bookingId} not found with status DRIVER_ASSIGNED, checking all statuses...`)
+
+        const bookingWithAnyStatus = await prisma.booking.findFirst({
+          where: {
+            id: bookingId,
+            providerId: driverId,
+          },
+          include: { customer: true },
+        })
+
+        if (bookingWithAnyStatus) {
+          console.log(`📊 Found booking ${bookingId} with status: ${bookingWithAnyStatus.status}`)
+
+          // Allow arriveAtPickup for bookings that are in valid "en route" states
+          const validStatuses = ["DRIVER_ASSIGNED", "DRIVER_EN_ROUTE"]
+          const alreadyArrivedStatuses = ["DRIVER_ARRIVED"]
+
+          if (validStatuses.includes(bookingWithAnyStatus.status)) {
+            console.log(`✅ Allowing arriveAtPickup for booking with status: ${bookingWithAnyStatus.status}`)
+            booking = bookingWithAnyStatus
+          } else if (alreadyArrivedStatuses.includes(bookingWithAnyStatus.status)) {
+            console.log(`ℹ️ Driver has already arrived at pickup for booking ${bookingId} (status: ${bookingWithAnyStatus.status})`)
+            // Return the existing booking without updating status
+            return bookingWithAnyStatus
+          } else {
+            throw new Error(`Booking found but has invalid status: ${bookingWithAnyStatus.status}. Expected one of: ${validStatuses.join(", ")}`)
+          }
+        } else {
+          console.log(`❌ Booking ${bookingId} not found for driver ${driverId}`)
+          throw new Error("Booking not found or invalid status")
+        }
       }
+
+      console.log(`✅ Found booking ${bookingId} with status: ${booking.status}`)
 
       // Update booking status
       const updatedBooking = await prisma.booking.update({
